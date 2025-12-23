@@ -5,9 +5,9 @@ A powerful email verification tool that supports both IMAP and POP3 protocols wi
 ## Features
 
 - **Hybrid Protocol Support**: Automatically checks POP3 first, then falls back to IMAP
-- **Smart Search Mode**: Toggle to use IMAP-only checking
+- **Smart Search Mode**: Toggle to use IMAP-only checking with intelligence search
 - **Auto-Discovery**: Automatically detects mail servers for common providers
-- **Proxy Support**: HTTP/HTTPS, SOCKS4, and SOCKS5 proxy support
+- **Proxy Support**: HTTP/HTTPS, SOCKS4, and SOCKS5 proxy support with auto-reload
 - **Real-time Updates**: Live status updates with safety delays
 - **Timestamped Results**: Organized results in timestamped session folders
 - **Export Functionality**: Right-click export menu for all result tables
@@ -47,48 +47,124 @@ python Universal_Mail_Checker.py
 
 ### Smart Search Mode
 
-- **Smart Search ON**: Uses IMAP protocol only for faster checking
-- **Smart Search OFF**: Tries POP3 first, then IMAP as fallback with 2-second safety delay
+- **Smart Search ON**: Uses IMAP protocol only (ports 993→143) for faster checking
+  - Enables Intelligence Search feature
+  - Creates `intelligence_results/` subfolder when keywords/senders are found
+- **Smart Search OFF**: Tries POP3 first (ports 995→110), then IMAP as fallback with 2-second safety delay
+  - No Intelligence Search capability
+  - Faster for POP3-only accounts
 
-### Proxy Configuration
+## File Format Rules
+
+### CRITICAL: Live.txt Format
+
+**Live.txt is ALWAYS saved with ONLY `email:pass` format:**
+```
+test@gmail.com:password123
+user@yahoo.com:mypass456
+admin@outlook.com:secret789
+```
+
+**NO protocol, NO port, NO extra information is saved to Live.txt**
+
+### Results Folder Structure
+
+#### Smart Search OFF:
+```
+Results/
+  └── 2025-12-23_14-30-45/
+      ├── Live.txt          (email:pass only)
+      ├── Banned.txt        (email:pass only)
+      ├── Unknown.txt       (email:pass only)
+      └── invalids.txt      (email:pass only)
+```
+
+#### Smart Search ON:
+```
+Results/
+  └── 2025-12-23_14-30-45/
+      ├── Live.txt          (email:pass only - SAME as OFF mode)
+      ├── Banned.txt
+      ├── Unknown.txt
+      ├── invalids.txt
+      └── intelligence_results/
+          ├── epicgames.com.txt       (email:pass | X messages)
+          ├── password.txt            (email:pass | X messages)
+          ├── invoice.txt             (email:pass | X messages)
+          └── microsoft.com.txt       (email:pass | X messages)
+```
+
+### Intelligence Results Files
+
+When Smart Search is ON and keywords/senders are found, separate files are created in the `intelligence_results/` subfolder:
+
+**Format**: `email:pass | X messages`
+
+**Example** (`epicgames.com.txt`):
+```
+test@gmail.com:pass123 | 5 messages
+gamer@yahoo.com:pass456 | 12 messages
+```
+
+**Example** (`password.txt`):
+```
+admin@gmail.com:admin123 | 8 messages
+support@hotmail.com:pass999 | 15 messages
+```
+
+## Proxy Configuration
+
+### Auto-Reload Proxies
 
 1. Go to **Tools** → **Settings** → **Proxy** tab
-2. Enable proxies and select type (HTTP/HTTPS, SOCKS4, SOCKS5)
-3. Optionally load proxies from file or URL
+2. Enable "Auto-Reload Proxies"
+3. Enter proxy URL (returns proxies in `IP:PORT` format)
+4. When active proxies drop below 10, the checker automatically:
+   - Loads new proxies from the URL
+   - Clears blocked proxy list
+   - Shows proxy count updates in log
 
-### Results
+### Manual Proxy Loading
 
-Results are automatically saved to timestamped folders in `Results/`:
-- **Live.txt**: Valid credentials (format: `email:pass | Protocol | Capture`)
-- **Banned.txt**: Invalid credentials
-- **Unknown.txt**: Connection errors or unknown issues
+1. Enable proxies and select type (HTTP/HTTPS, SOCKS4, SOCKS5)
+2. Load proxies from file or URL
+3. Optional: Set username/password for authenticated proxies
+
+## Intelligence Search
+
+### Configuration (Smart Search ON only)
+
+1. Go to **Tools** → **Settings** → **Intelligence Search** tab
+2. Add senders (one per line):
+   ```
+   epicgames.com
+   account@microsoft.com
+   ```
+3. Add keywords (one per line):
+   ```
+   password
+   invoice
+   ```
+4. Select where to search: Subject, Body, or both
+5. Configure mailboxes to search (default: `INBOX,Spam`)
+6. Set fetch count (how many recent emails to check per account)
+
+### How It Works
+
+When a valid account is found (Smart Search ON):
+1. Logs into IMAP
+2. Searches specified mailboxes for keywords/senders
+3. Creates one file per keyword/sender in `intelligence_results/`
+4. Saves as: `email:pass | X messages`
 
 ## Configuration Files
 
 - **imap_servers.txt**: Pre-configured IMAP servers for common providers
 - **pop_servers.txt**: Pre-configured POP3 servers for common providers
 
-You can add custom servers in the format: `domain.com,server.domain.com`
+Format: `domain.com,server.domain.com`
 
-## Keyboard Shortcuts
-
-- **F5**: Reload combo list
-- **Ctrl+S**: Open settings
-- **Ctrl+Q**: Quit application
-
-## Advanced Features
-
-### Thread Count
-
-Adjust the number of concurrent threads (10-5000) for optimal performance based on your system.
-
-### Timeout Configuration
-
-Set connection timeout (1-120 seconds) to balance speed and accuracy.
-
-### Safety Delays
-
-When Smart Search is OFF, the checker waits 2 seconds between POP3 and IMAP attempts to avoid rate limiting.
+You can add custom servers manually.
 
 ## Troubleshooting
 
@@ -106,8 +182,10 @@ When Smart Search is OFF, the checker waits 2 seconds between POP3 and IMAP atte
 
 ## Credits
 
-Developed by MOATTYA
+**Title**: UNIVERSAL MAIL CHECKER  
+**Author**: MOATTYA
 
 ## License
 
 This tool is for educational purposes only. Use responsibly and only on accounts you own or have permission to test.
+

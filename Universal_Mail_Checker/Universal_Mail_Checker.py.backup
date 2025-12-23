@@ -7,8 +7,6 @@ import socket
 import threading
 import time
 import re
-import email
-from email.header import decode_header
 from queue import Queue
 from datetime import datetime, timedelta
 from collections import deque, defaultdict
@@ -37,50 +35,6 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QTextCursor
 logging.basicConfig(level=logging.WARNING,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.FileHandler("universal_mail_checker_debug.log", mode='w', encoding='utf-8')])
-
-
-def decode_mime_header(header):
-    """Decode MIME encoded email headers"""
-    if header is None:
-        return ""
-    decoded_parts = decode_header(header)
-    parts = []
-    for part, charset in decoded_parts:
-        if isinstance(part, bytes):
-            try:
-                parts.append(part.decode(charset or 'utf-8', errors='ignore'))
-            except (LookupError, TypeError):
-                parts.append(part.decode('utf-8', errors='ignore'))
-        else:
-            parts.append(str(part))
-    return "".join(parts)
-
-
-def parse_email_body(msg):
-    """Parse email body from message"""
-    body = ""
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition"))
-            
-            if content_type in ["text/plain", "text/html"] and "attachment" not in content_disposition:
-                try:
-                    payload = part.get_payload(decode=True)
-                    charset = part.get_content_charset() or 'utf-8'
-                    part_body = payload.decode(charset, errors='replace')
-                    body += part_body + "\n"
-                except Exception:
-                    continue
-    else:
-        try:
-            payload = msg.get_payload(decode=True)
-            charset = msg.get_content_charset() or 'utf-8'
-            body = payload.decode(charset, errors='replace')
-        except Exception as e:
-            body = f"[Could not decode body: {e}]"
-    return body
-
 
 
 class ServerManager:
@@ -148,14 +102,13 @@ class AutoDiscovery:
 
 
 class WorkerSignals(QObject):
-    progress = pyqtSignal(int, int, int, int, int)  # checked, hits, invalids, errors, intelligence
+    progress = pyqtSignal(int, int, int, int)
     log = pyqtSignal(str, QColor)
     finished = pyqtSignal(dict, float, int)
     cpm = pyqtSignal(int)
     add_hit = pyqtSignal(str, str, str)  # combo, protocol, capture
     add_invalid = pyqtSignal(str, str)
     add_error = pyqtSignal(str, str)
-    add_intelligence_hit = pyqtSignal(str, str, str, str, list)  # email, match_type, match_detail, mailbox, details_list
 
 
 class MailCheckerWorker(QObject):
@@ -164,16 +117,13 @@ class MailCheckerWorker(QObject):
         self.settings = settings
         self.is_running = True
         self.is_paused = False
-        self.stats = {'hits': 0, 'invalids': 0, 'errors': 0, 'checked': 0, 'intelligence_hits': 0}
+        self.stats = {'hits': 0, 'invalids': 0, 'errors': 0, 'checked': 0}
         
         self.session_folder = self.create_session_folder()
         
-        # File paths - CRITICAL: Use exact names from problem statement
         self.settings['live_file'] = os.path.join(self.session_folder, 'Live.txt')
         self.settings['banned_file'] = os.path.join(self.session_folder, 'Banned.txt')
         self.settings['unknown_file'] = os.path.join(self.session_folder, 'Unknown.txt')
-        self.settings['invalids_file'] = os.path.join(self.session_folder, 'invalids.txt')
-        self.settings['intelligence_results_folder'] = os.path.join(self.session_folder, 'intelligence_results')
         
         self.combo_file_path = None
         self.proxies = []
@@ -201,11 +151,6 @@ class MailCheckerWorker(QObject):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         session_folder = os.path.join(base_folder, timestamp)
         os.makedirs(session_folder, exist_ok=True)
-        
-        # Create intelligence_results folder if Smart Search is enabled
-        if self.settings.get('smart_search', False):
-            intelligence_folder = os.path.join(session_folder, "intelligence_results")
-            os.makedirs(intelligence_folder, exist_ok=True)
         
         logging.info(f"Created session folder: {session_folder}")
         return session_folder
@@ -463,7 +408,7 @@ class MailCheckerWorker(QObject):
         except Exception as e:
             return {'status': 'error', 'combo': combo, 'reason': str(e)[:50]}
 
-    def process_result(self, result, live_file, banned_file, unknown_file, invalids_file):
+    def process_result(self, result, live_file, banned_file, unknown_file):
         if result is None:
             return
         
@@ -480,24 +425,19 @@ class MailCheckerWorker(QObject):
         if result['status'] == 'hit':
             protocol = result.get('protocol', 'Unknown')
             capture = result.get('capture', 'Valid')
-            # CRITICAL: Live.txt format is "email:pass" ONLY - NO protocol, NO capture info
-            live_file.write(f"{result['combo']}\n")
+            output_line = f"{result['combo']} | {protocol} | {capture}\n"
+            live_file.write(output_line)
             live_file.flush()
-            # Display includes protocol info in GUI
             self.signals.log.emit(f"HIT -> {result['combo']} | {protocol} | {capture}", QColor("#4ade80"))
             self.signals.add_hit.emit(result['combo'], protocol, capture)
             
         elif result['status'] == 'invalid':
-            # Write to both Banned.txt and invalids.txt as per problem statement
-            banned_file.write(f"{result['combo']}\n")
-            invalids_file.write(f"{result['combo']}\n")
+            banned_file.write(result['combo'] + '\n')
             if self.stats['invalids'] % 100 == 0:
                 banned_file.flush()
-                invalids_file.flush()
             self.signals.add_invalid.emit(result['combo'], result.get('reason', 'Invalid'))
             
         elif result['status'] == 'error':
-            # Unknown.txt for errors
             unknown_file.write(f"{result['combo']}\n")
             if self.stats['errors'] % 50 == 0:
                 unknown_file.flush()
@@ -513,8 +453,7 @@ class MailCheckerWorker(QObject):
                     self.stats['checked'], 
                     self.stats['hits'], 
                     self.stats['invalids'], 
-                    self.stats['errors'],
-                    self.stats['intelligence_hits']
+                    self.stats['errors']
                 )
             self._progress_counter = 0
             
@@ -532,7 +471,6 @@ class MailCheckerWorker(QObject):
         live_file = None
         banned_file = None
         unknown_file = None
-        invalids_file = None
         
         try:
             max_workers = self.settings['threads']
@@ -540,7 +478,6 @@ class MailCheckerWorker(QObject):
             live_file = open(self.settings['live_file'], 'w', encoding='utf-8', buffering=8192)
             banned_file = open(self.settings['banned_file'], 'w', encoding='utf-8', buffering=8192)
             unknown_file = open(self.settings['unknown_file'], 'w', encoding='utf-8', buffering=8192)
-            invalids_file = open(self.settings['invalids_file'], 'w', encoding='utf-8', buffering=8192)
             
             try:
                 executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -591,7 +528,7 @@ class MailCheckerWorker(QObject):
                                 try:
                                     result = future.result(timeout=0.01)
                                     if result is not None:
-                                        self.process_result(result, live_file, banned_file, unknown_file, invalids_file)
+                                        self.process_result(result, live_file, banned_file, unknown_file)
                                 except Exception as e:
                                     if self.is_running:
                                         logging.error(f"Result error: {e}")
@@ -624,8 +561,6 @@ class MailCheckerWorker(QObject):
                     banned_file.close()
                 if unknown_file:
                     unknown_file.close()
-                if invalids_file:
-                    invalids_file.close()
             except:
                 pass
             
@@ -634,8 +569,7 @@ class MailCheckerWorker(QObject):
                     self.stats['checked'], 
                     self.stats['hits'], 
                     self.stats['invalids'], 
-                    self.stats['errors'],
-                    self.stats['intelligence_hits']
+                    self.stats['errors']
                 )
             
             elapsed_time = time.time() - self.start_time
@@ -894,7 +828,7 @@ class MainWindow(QMainWindow):
         self.progress_timer = QTimer()
         self.progress_timer.timeout.connect(self.timer_update_progress)
         self.progress_timer.start(500)
-        self.last_gui_stats = (0, 0, 0, 0, 0)  # checked, hits, invalids, errors, intelligence
+        self.last_gui_stats = (0, 0, 0, 0)
         self.cpm = 0
         
         self.max_table_rows = 1000
@@ -1366,7 +1300,6 @@ Checked: {final_stats['checked']:,}
 Hits: {final_stats['hits']:,}
 Invalids: {final_stats['invalids']:,}
 Errors: {final_stats['errors']:,}
-Intelligence Hits: {final_stats.get('intelligence_hits', 0):,}
 
 Time: {elapsed_str}
 Average CPM: {final_cpm:,}
@@ -1411,15 +1344,14 @@ Results saved to:
         self._invalid_batch = []
         self._error_batch = []
 
-    def set_last_gui_stats(self, checked, hits, invalids, errors, intelligence):
-        self.last_gui_stats = (checked, hits, invalids, errors, intelligence)
+    def set_last_gui_stats(self, checked, hits, invalids, errors):
+        self.last_gui_stats = (checked, hits, invalids, errors)
         self.tabs.setTabText(0, f"HITS ({hits:,})")
         self.tabs.setTabText(1, f"INVALIDS ({invalids:,})")
         self.tabs.setTabText(2, f"ERRORS ({errors:,})")
-        # Tab 3 is LOG, Tab 4 will be INTELLIGENCE if we add it
 
     def timer_update_progress(self):
-        checked, hits, invalids, errors, intelligence = self.last_gui_stats
+        checked, hits, invalids, errors = self.last_gui_stats
         if self.combos_loaded > 0:
             self.progress_bar.setValue(checked)
         
