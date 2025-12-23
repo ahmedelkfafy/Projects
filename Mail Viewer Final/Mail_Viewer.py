@@ -63,6 +63,9 @@ class HTMLTextExtractor(HTMLParser):
 class SmartLoginHandler:
     """Advanced login handler with aggressive hybrid IMAP/POP3 connection and auto-cleaning DB"""
     
+    # Safety delay between protocol attempts (seconds)
+    PROTOCOL_SWITCH_DELAY = 3
+    
     def __init__(self, db_path: str = "./email_config"):
         """Initialize SmartLoginHandler
         
@@ -180,7 +183,7 @@ class SmartLoginHandler:
                 conn = imaplib.IMAP4(server, port, timeout=timeout)
                 try:
                     conn.starttls()
-                except:
+                except (imaplib.IMAP4.error, ssl.SSLError):
                     pass  # StartTLS optional for port 143
             
             try:
@@ -190,7 +193,7 @@ class SmartLoginHandler:
                 # Authentication failed
                 try:
                     conn.logout()
-                except:
+                except Exception:
                     pass
                 return False, None, 'AUTH'
         except (socket.timeout, socket.error, OSError, ssl.SSLError) as e:
@@ -212,7 +215,7 @@ class SmartLoginHandler:
                 conn = poplib.POP3(server, port, timeout=timeout)
                 try:
                     conn.stls()
-                except:
+                except (poplib.error_proto, ssl.SSLError):
                     pass  # STLS optional for port 110
             
             try:
@@ -223,7 +226,7 @@ class SmartLoginHandler:
                 # Authentication failed
                 try:
                     conn.quit()
-                except:
+                except Exception:
                     pass
                 return False, None, 'AUTH'
         except (socket.timeout, socket.error, OSError, ssl.SSLError) as e:
@@ -314,7 +317,7 @@ class SmartLoginHandler:
         
         # Safety delay before trying POP3
         if auth_failed or len(imap_servers_to_try) > 0:
-            time.sleep(3)
+            time.sleep(self.PROTOCOL_SWITCH_DELAY)
         
         # PHASE 2: POP3 (Fallback)
         pop_servers_to_try = []
