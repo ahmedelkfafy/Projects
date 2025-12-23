@@ -7,6 +7,8 @@ import socket
 import threading
 import time
 import re
+import email
+from email.header import decode_header
 from queue import Queue
 from datetime import datetime, timedelta
 from collections import deque, defaultdict
@@ -35,6 +37,50 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QTextCursor
 logging.basicConfig(level=logging.WARNING,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.FileHandler("universal_mail_checker_debug.log", mode='w', encoding='utf-8')])
+
+
+def decode_mime_header(header):
+    """Decode MIME encoded email headers"""
+    if header is None:
+        return ""
+    decoded_parts = decode_header(header)
+    parts = []
+    for part, charset in decoded_parts:
+        if isinstance(part, bytes):
+            try:
+                parts.append(part.decode(charset or 'utf-8', errors='ignore'))
+            except (LookupError, TypeError):
+                parts.append(part.decode('utf-8', errors='ignore'))
+        else:
+            parts.append(str(part))
+    return "".join(parts)
+
+
+def parse_email_body(msg):
+    """Parse email body from message"""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition"))
+            
+            if content_type in ["text/plain", "text/html"] and "attachment" not in content_disposition:
+                try:
+                    payload = part.get_payload(decode=True)
+                    charset = part.get_content_charset() or 'utf-8'
+                    part_body = payload.decode(charset, errors='replace')
+                    body += part_body + "\n"
+                except Exception:
+                    continue
+    else:
+        try:
+            payload = msg.get_payload(decode=True)
+            charset = msg.get_content_charset() or 'utf-8'
+            body = payload.decode(charset, errors='replace')
+        except Exception as e:
+            body = f"[Could not decode body: {e}]"
+    return body
+
 
 
 class ServerManager:
