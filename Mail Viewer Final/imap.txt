@@ -1,0 +1,2 @@
+# IMAP Server Mappings - Auto-updated with working servers
+# Format: domain.com|imap.server.com
