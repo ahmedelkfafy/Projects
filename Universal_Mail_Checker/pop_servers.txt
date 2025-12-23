@@ -1,0 +1,7 @@
+gmail.com,pop.gmail.com
+yahoo.com,pop.mail.yahoo.com
+outlook.com,pop-mail.outlook.com
+hotmail.com,pop-mail.outlook.com
+live.com,pop-mail.outlook.com
+aol.com,pop.aol.com
+icloud.com,pop.mail.me.com
