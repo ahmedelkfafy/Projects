@@ -383,6 +383,7 @@ class MailViewerBackend:
         
         self._search_cache = {}
         self._cached_emails = []
+        self._cached_email_ids = set()  # Track IDs for faster duplicate detection
         
         self.servers = self.load_servers()
         self.config_servers = self.load_config_servers()
@@ -743,12 +744,18 @@ class MailViewerBackend:
             
             # Add to cache and keep only last 50 emails
             for email_data in emails:
-                if email_data not in self._cached_emails:
+                email_id = email_data.get('id')
+                if email_id and email_id not in self._cached_email_ids:
                     self._cached_emails.append(email_data)
+                    self._cached_email_ids.add(email_id)
             
             # Keep only last 50 emails
             if len(self._cached_emails) > 50:
+                removed_emails = self._cached_emails[:-50]
                 self._cached_emails = self._cached_emails[-50:]
+                # Update ID set
+                for email_data in removed_emails:
+                    self._cached_email_ids.discard(email_data.get('id'))
             
             return emails, total
         except:
@@ -777,8 +784,10 @@ class MailViewerBackend:
                     emails.append(parsed)
                     
                     # Add to cache
-                    if parsed not in self._cached_emails:
+                    email_id = parsed.get('id')
+                    if email_id and email_id not in self._cached_email_ids:
                         self._cached_emails.append(parsed)
+                        self._cached_email_ids.add(email_id)
                     
                     if progress_callback:
                         progress_callback(len(emails), total)
@@ -787,7 +796,11 @@ class MailViewerBackend:
             
             # After loop, keep only last 50 emails
             if len(self._cached_emails) > 50:
+                removed_emails = self._cached_emails[:-50]
                 self._cached_emails = self._cached_emails[-50:]
+                # Update ID set
+                for email_data in removed_emails:
+                    self._cached_email_ids.discard(email_data.get('id'))
             
             return emails[::-1], num_messages
         except:
@@ -1111,6 +1124,8 @@ class MailViewerBackend:
             self.host = None
             self.port = None
             self.current_folder = 'INBOX'
+            self._cached_emails = []
+            self._cached_email_ids = set()
 
 
 class MailViewerGUI:
