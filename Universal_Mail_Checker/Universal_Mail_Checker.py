@@ -15,6 +15,8 @@ from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import gc
+import subprocess
+import platform
 
 try:
     import socks
@@ -1359,7 +1361,8 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Combo List", "", "Text Files (*.txt);;All Files (*)")
         if file_path:
             try:
-                self.combos_loaded = sum(1 for _ in open(file_path, 'r', encoding='utf-8', errors='ignore'))
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.combos_loaded = sum(1 for _ in f)
                 self.combos_file_path = file_path
                 self.combos_info.setText(f"Combos: {self.combos_loaded:,}")
                 self.progress_bar.setMaximum(self.combos_loaded)
@@ -1382,9 +1385,6 @@ class MainWindow(QMainWindow):
 
     def open_results_folder(self):
         """Open results folder in file explorer"""
-        import subprocess
-        import platform
-        
         folder = self.current_session_folder if self.current_session_folder and os.path.exists(self.current_session_folder) else "Results"
         
         if not os.path.exists(folder):
