@@ -306,7 +306,7 @@ class MailCheckerWorker(QObject):
             stat_response = pop_conn.stat()
             message_count = stat_response[0] if stat_response else 0
             pop_conn.quit()
-            return True, f"{message_count} messages", None
+            return True, f"{message_count}msg", None
             
         except poplib.error_proto as e:
             if pop_conn:
@@ -364,7 +364,7 @@ class MailCheckerWorker(QObject):
                         message_count = len(data[0].split())
                     else:
                         message_count = 0
-                    capture = f"{message_count} messages"
+                    capture = f"{message_count}msg"
                 except:
                     capture = "Valid"
                 
@@ -538,10 +538,10 @@ class MailCheckerWorker(QObject):
             )
             
             with open(output_file, 'a', encoding='utf-8') as f:
-                f.write(f"{combo} | {message_count} messages\n")
+                f.write(f"{combo} | {message_count}msg\n")
             
             self.signals.log.emit(
-                f"Intelligence: {combo} -> {match_detail} ({message_count} msgs)", 
+                f"Intelligence: {combo} -> {match_detail} ({message_count}msg)", 
                 QColor("cyan")
             )
         except Exception as e:
@@ -651,7 +651,7 @@ class MailCheckerWorker(QObject):
                         imap_conn.select('INBOX', readonly=True)
                         typ, data = imap_conn.search(None, 'ALL')
                         message_count = len(data[0].split()) if typ == 'OK' and data[0] else 0
-                        capture = f"{message_count} messages"
+                        capture = f"{message_count}msg"
                     except:
                         capture = "Valid"
                     
@@ -1478,7 +1478,7 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.results_table_hits = self.create_results_table(["Email", "Password", "Status", "Protocol", "Capture/Result"])
+        self.results_table_hits = self.create_results_table(["Combo", "Status", "Protocol", "Capture/Result"])
         self.results_table_invalids = self.create_results_table(["Combo", "Reason"])
         self.results_table_errors = self.create_results_table(["Combo", "Error"])
         
@@ -1820,25 +1820,19 @@ class MainWindow(QMainWindow):
                 row = self.results_table_hits.rowCount()
                 self.results_table_hits.insertRow(row)
                 
-                # Parse combo
-                parts = combo_str.split(':')
-                email = parts[0] if len(parts) > 0 else combo_str
-                password = parts[1] if len(parts) > 1 else ''
+                # Single combo column (email:pass)
+                item1 = QTableWidgetItem(combo_str)
+                item2 = QTableWidgetItem("Live")
+                item3 = QTableWidgetItem(prot_str)
+                item4 = QTableWidgetItem(capt_str)
                 
-                item1 = QTableWidgetItem(email)
-                item2 = QTableWidgetItem(password)
-                item3 = QTableWidgetItem("Live")
-                item4 = QTableWidgetItem(prot_str)
-                item5 = QTableWidgetItem(capt_str)
-                
-                for item in [item1, item2, item3, item4, item5]:
+                for item in [item1, item2, item3, item4]:
                     item.setForeground(QBrush(QColor("#4ade80")))
                 
-                self.results_table_hits.setItem(row, 0, item1)
-                self.results_table_hits.setItem(row, 1, item2)
-                self.results_table_hits.setItem(row, 2, item3)
-                self.results_table_hits.setItem(row, 3, item4)
-                self.results_table_hits.setItem(row, 4, item5)
+                self.results_table_hits.setItem(row, 0, item1)  # Combo
+                self.results_table_hits.setItem(row, 1, item2)  # Status
+                self.results_table_hits.setItem(row, 2, item3)  # Protocol
+                self.results_table_hits.setItem(row, 3, item4)  # Capture
             
             self.results_table_hits.setUpdatesEnabled(True)
             self._hit_batch.clear()
