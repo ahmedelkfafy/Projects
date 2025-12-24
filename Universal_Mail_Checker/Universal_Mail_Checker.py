@@ -44,6 +44,7 @@ logging.basicConfig(level=logging.WARNING,
 # Default settings constants
 DEFAULT_KEYWORDS = "password\ninvoice\nverification"
 DEFAULT_SENDERS = "epicgames.com\nmicrosoft.com"
+MIN_PROXIES_THRESHOLD = 10  # Minimum active proxies before auto-reload
 
 
 def decode_mime_header(header):
@@ -214,7 +215,7 @@ class MailCheckerWorker(QObject):
         self.proxy_reload_url = settings.get('proxy_reload_url', '')
         self.proxy_reload_lock = threading.Lock()
         self.blocked_proxies = set()
-        self.min_proxies_threshold = 10
+        self.min_proxies_threshold = MIN_PROXIES_THRESHOLD
 
     def create_session_folder(self):
         base_folder = "Results"
@@ -628,6 +629,7 @@ class MailCheckerWorker(QObject):
                 active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
                 if not active_proxies:
                     self.reload_proxies_if_needed()
+                    # Reload updates self.proxies, so recalculate active proxies
                     active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
                 if active_proxies:
                     proxy = random.choice(active_proxies)
