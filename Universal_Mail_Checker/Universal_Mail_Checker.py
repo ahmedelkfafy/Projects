@@ -15,6 +15,8 @@ from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import gc
+import subprocess
+import platform
 
 try:
     import socks
@@ -29,7 +31,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog,
     QFormLayout, QSpinBox, QTabWidget, QStatusBar, QDialogButtonBox,
-    QMenu, QTextEdit, QCheckBox, QGroupBox, QComboBox, QFrame
+    QMenu, QTextEdit, QCheckBox, QGroupBox, QComboBox, QFrame, QProgressBar
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, Qt, QSettings, QTimer
 from PyQt6.QtGui import QFont, QColor, QBrush, QTextCursor
@@ -1154,6 +1156,250 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #a3a3a3;")
         self.status_bar.addWidget(self.status_label, 1)
 
+    def create_button(self, text, color1, color2):
+        """Create a styled button"""
+        btn = QPushButton(text)
+        btn.setFixedSize(120, 45)
+        btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {color1}, stop:1 {color2});
+                color: white;
+                border: none;
+                border-radius: 8px;
+                letter-spacing: 1px;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {color2}, stop:1 #a3a3a3);
+            }}
+            QPushButton:pressed {{
+                background: {color1};
+            }}
+            QPushButton:disabled {{
+                background: rgba(64, 64, 64, 0.3);
+                color: rgba(115, 115, 115, 0.5);
+            }}
+        """)
+        return btn
+
+    def create_small_button(self, text):
+        """Create a small styled button"""
+        btn = QPushButton(text)
+        btn.setFixedHeight(32)
+        btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(82, 82, 82, 0.4), stop:1 rgba(115, 115, 115, 0.4));
+                color: #d4d4d4;
+                border: 2px solid rgba(115, 115, 115, 0.4);
+                border-radius: 6px;
+                padding: 0 18px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(82, 82, 82, 0.6), stop:1 rgba(115, 115, 115, 0.6));
+                border: 2px solid rgba(163, 163, 163, 0.6);
+            }
+        """)
+        return btn
+
+    def create_stat_card(self, label_text, value, color):
+        """Create a statistics card widget"""
+        widget = QFrame()
+        widget.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(64, 64, 64, 0.2);
+                border-left: 4px solid {color};
+                border-radius: 10px;
+                padding: 12px;
+            }}
+        """)
+        
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(5)
+        
+        label = QLabel(label_text)
+        label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        label.setStyleSheet(f"color: {color}; border: none; letter-spacing: 1px;")
+        
+        value_label = QLabel(value)
+        value_label.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        value_label.setStyleSheet(f"color: {color}; border: none;")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        value_label.setWordWrap(False)
+        
+        layout.addWidget(label)
+        layout.addWidget(value_label)
+        
+        widget.value_label = value_label
+        
+        return widget
+
+    def create_results_table(self, headers):
+        """Create a styled results table"""
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        if len(headers) > 1:
+            for i in range(1, len(headers)):
+                table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(lambda pos, t=table: self.show_table_context_menu(t, pos))
+        table.setAlternatingRowColors(True)
+        table.setStyleSheet("""
+            QTableWidget {
+                background: rgba(26, 26, 26, 0.3);
+                color: #d4d4d4;
+                gridline-color: rgba(115, 115, 115, 0.1);
+                border: none;
+                font-size: 10pt;
+            }
+            QTableWidget::item {
+                padding: 12px;
+                border-bottom: 1px solid rgba(115, 115, 115, 0.1);
+            }
+            QTableWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(82, 82, 82, 0.5), stop:1 rgba(115, 115, 115, 0.5));
+                color: white;
+            }
+            QTableWidget::item:alternate {
+                background: rgba(64, 64, 64, 0.1);
+            }
+            QHeaderView::section {
+                background: rgba(82, 82, 82, 0.3);
+                color: #a3a3a3;
+                padding: 12px;
+                border: none;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+        """)
+        return table
+
+    def init_actions(self):
+        """Initialize button actions"""
+        self.btn_start.clicked.connect(self.start_checking)
+        self.btn_pause.clicked.connect(self.pause_checking)
+        self.btn_stop.clicked.connect(self.stop_checking)
+
+    def apply_theme(self):
+        """Apply Fusion dark theme"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f0f0f, stop:0.5 #1a1a1a, stop:1 #0f0f0f);
+            }
+            QWidget {
+                color: #d4d4d4;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QMenuBar {
+                background: rgba(26, 26, 26, 0.8);
+                color: #d4d4d4;
+                border-bottom: 2px solid rgba(115, 115, 115, 0.3);
+                padding: 8px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 8px 15px;
+                border-radius: 6px;
+            }
+            QMenuBar::item:selected {
+                background: rgba(115, 115, 115, 0.3);
+            }
+            QMenu {
+                background: rgba(26, 26, 26, 0.95);
+                color: #d4d4d4;
+                border: 2px solid rgba(115, 115, 115, 0.3);
+                border-radius: 8px;
+            }
+            QMenu::item {
+                padding: 10px 25px;
+                border-radius: 5px;
+            }
+            QMenu::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #525252, stop:1 #737373);
+            }
+            QStatusBar {
+                background: rgba(26, 26, 26, 0.8);
+                color: #737373;
+                border-top: 2px solid rgba(115, 115, 115, 0.3);
+            }
+        """)
+
+    def open_settings(self):
+        """Open settings dialog"""
+        dialog = SettingsDialog(self.settings, self)
+        dialog.exec()
+
+    def get_current_settings(self):
+        """Get current settings as dictionary"""
+        return {
+            "threads": self.settings.value("threads", 200, type=int),
+            "timeout": self.settings.value("timeout", 10, type=int),
+            "delimiter": self.settings.value("delimiter", ":"),
+            "smart_search": self.settings.value("smart_search", False, type=bool),
+            "use_proxies": self.settings.value("use_proxies", False, type=bool),
+            "proxy_type": self.settings.value("proxy_type", "HTTP/HTTPS"),
+            "proxy_username": self.settings.value("proxy_username", ""),
+            "proxy_password": self.settings.value("proxy_password", "")
+        }
+
+    def load_combos(self):
+        """Load combo list file"""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Combo List", "", "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.combos_loaded = sum(1 for _ in f)
+                self.combos_file_path = file_path
+                self.combos_info.setText(f"Combos: {self.combos_loaded:,}")
+                self.progress_bar.setMaximum(self.combos_loaded)
+                self.update_status(f"Loaded {self.combos_loaded:,} combos", "#a3a3a3")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load combo file: {e}")
+
+    def load_proxies(self):
+        """Load proxy list file"""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Proxy List", "", "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.proxies = [line.strip() for line in f if line.strip()]
+                self.proxies_loaded = len(self.proxies)
+                self.proxies_info.setText(f"Proxies: {self.proxies_loaded:,}")
+                self.update_status(f"Loaded {self.proxies_loaded:,} proxies", "#a3a3a3")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load proxy file: {e}")
+
+    def open_results_folder(self):
+        """Open results folder in file explorer"""
+        folder = self.current_session_folder if self.current_session_folder and os.path.exists(self.current_session_folder) else "Results"
+        
+        if not os.path.exists(folder):
+            QMessageBox.warning(self, "Error", "No results folder found!")
+            return
+        
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(folder)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', folder])
+            else:
+                subprocess.call(['xdg-open', folder])
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
 
     def start_checking(self):
         if not hasattr(self, 'combos_file_path') or not self.combos_file_path:
