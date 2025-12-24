@@ -465,6 +465,10 @@ class MailCheckerWorker(QObject):
         if not self.is_running or not self.intelligence_search:
             return
         
+        # ✅ CRITICAL FIX: Create immutable combo snapshot immediately
+        # This protects against parameter changes during async execution
+        COMBO_SNAPSHOT = f"{email_addr}:{password}"
+        
         try:
             keywords = [k.strip() for k in self.intelligence_keywords if k.strip()]
             senders = [s.strip() for s in self.intelligence_senders if s.strip()]
@@ -503,7 +507,8 @@ class MailCheckerWorker(QObject):
                         if typ == 'OK' and data[0]:
                             message_count = len(data[0].split())
                             if message_count > 0:
-                                self.save_intelligence_result(keyword, f"{email_addr}:{password}", message_count)
+                                # ✅ USE COMBO_SNAPSHOT (immutable, thread-safe)
+                                self.save_intelligence_result(keyword, COMBO_SNAPSHOT, message_count)
                                 with self.stats_lock:
                                     self.stats['intelligence_hits'] += 1
                     
@@ -517,7 +522,8 @@ class MailCheckerWorker(QObject):
                         if typ == 'OK' and data[0]:
                             message_count = len(data[0].split())
                             if message_count > 0:
-                                self.save_intelligence_result(sender, f"{email_addr}:{password}", message_count)
+                                # ✅ USE COMBO_SNAPSHOT (immutable, thread-safe)
+                                self.save_intelligence_result(sender, COMBO_SNAPSHOT, message_count)
                                 with self.stats_lock:
                                     self.stats['intelligence_hits'] += 1
                     
@@ -643,8 +649,12 @@ class MailCheckerWorker(QObject):
                 success, imap_conn, error = self.try_imap_login_keep_connection(email_addr, password, imap_server, imap_port, timeout)
                 
                 if success:
-                    # Search emails for intelligence
-                    self.search_emails_for_intelligence(imap_conn, email_addr, password)
+                    # ✅ CRITICAL FIX: Create immutable local snapshots for thread safety
+                    snapshot_email = str(email_addr)
+                    snapshot_password = str(password)
+                    
+                    # ✅ Pass snapshots instead of original variables
+                    self.search_emails_for_intelligence(imap_conn, snapshot_email, snapshot_password)
                     
                     # Get message count
                     try:
