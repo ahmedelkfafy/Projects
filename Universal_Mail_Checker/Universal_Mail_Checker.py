@@ -39,7 +39,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog,
     QFormLayout, QSpinBox, QTabWidget, QStatusBar, QDialogButtonBox,
-    QMenu, QTextEdit, QCheckBox, QGroupBox, QComboBox, QFrame, QProgressBar
+    QMenu, QTextEdit, QCheckBox, QGroupBox, QComboBox, QFrame, QProgressBar,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, Qt, QSettings, QTimer
 from PyQt6.QtGui import QFont, QColor, QBrush, QTextCursor
@@ -2581,8 +2582,6 @@ Results saved to:
             QMessageBox.critical(self, "Error", f"Failed to reload blacklist: {e}")
 
     def view_blacklist(self):
-        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
-        
         dialog = QDialog(self)
         dialog.setWindowTitle("Blacklist")
         dialog.setMinimumSize(700, 550)
