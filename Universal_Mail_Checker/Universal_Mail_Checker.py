@@ -325,7 +325,7 @@ class MailCheckerWorker(QObject):
         try:
             domain = email.split('@')[1].lower()
             return domain in self.blacklist
-        except:
+        except IndexError:
             return False
 
     def try_pop3_login(self, email_addr, password, server, port, timeout=5):
@@ -2666,9 +2666,9 @@ Results saved to:
             if platform.system() == 'Windows':
                 os.startfile(blacklist_file)
             elif platform.system() == 'Darwin':
-                subprocess.call(['open', blacklist_file])
+                subprocess.run(['open', blacklist_file], check=False)
             else:
-                subprocess.call(['xdg-open', blacklist_file])
+                subprocess.run(['xdg-open', blacklist_file], check=False)
                 
             QMessageBox.information(self, "Blacklist", 
                                   "The blacklist file has been opened for editing.\nRemember to reload the blacklist after making changes.")

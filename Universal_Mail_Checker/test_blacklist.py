@@ -101,7 +101,7 @@ class MailCheckerWorkerSimulation:
         try:
             domain = email.split('@')[1].lower()
             return domain in self.blacklist
-        except:
+        except IndexError:
             return False
     
     def check_combo(self, email, password):
