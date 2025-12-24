@@ -180,6 +180,35 @@ You can add custom servers manually.
 ### "Import errors"
 - Ensure all dependencies are installed: `pip install -r requirements.txt`
 
+## Advanced Features
+
+### Multi-Port Fallback
+The checker automatically tries multiple ports for better compatibility:
+
+**POP3 Protocol:**
+- Port 995 (SSL) with adaptive timeout (3-5s first attempt, then full timeout)
+- Port 110 (non-SSL) if 995 fails
+
+**IMAP Protocol:**
+- Port 993 (SSL) with adaptive timeout (5-8s first attempt, then full timeout)  
+- Port 143 (non-SSL) if 993 fails
+
+### Adaptive Timeout Strategy
+- **First Attempt**: Quick timeout (3-5s for POP3, 5-8s for IMAP)
+- **Retry Attempt**: Full timeout value from settings
+- **Benefits**: Faster checking on working servers, full timeout for slow servers
+
+### Connection Flow Example
+```
+POP3 Check:
+1. Try port 995 SSL (3-5s timeout)
+2. Retry port 995 SSL (full timeout) if timeout
+3. Try port 110 non-SSL (3-5s timeout)
+4. Retry port 110 non-SSL (full timeout) if timeout
+
+If all POP3 attempts fail → Wait 2s → Try IMAP (same multi-port strategy)
+```
+
 ## Credits
 
 **Title**: UNIVERSAL MAIL CHECKER  

