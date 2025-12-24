@@ -4,7 +4,7 @@ import email
 from email.header import decode_header
 import configparser
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
@@ -13,6 +13,9 @@ import re
 from html.parser import HTMLParser
 import webbrowser
 import json
+import ssl
+import time
+import socket
 
 # Fix IMAP response size limit
 imaplib._MAXLINE = 10000000  # 10MB
@@ -55,6 +58,315 @@ class HTMLTextExtractor(HTMLParser):
     
     def get_text(self):
         return ''.join(self.text)
+
+
+class SmartLoginHandler:
+    """Advanced login handler with aggressive hybrid IMAP/POP3 connection and auto-cleaning DB"""
+    
+    # Safety delay between protocol attempts (seconds)
+    PROTOCOL_SWITCH_DELAY = 3
+    
+    def __init__(self, db_path: str = "./email_config"):
+        """Initialize SmartLoginHandler
+        
+        Args:
+            db_path: Path to directory containing server configuration files
+        """
+        self.db_path = db_path
+        self.imap_servers = {}
+        self.pop_servers = {}
+        self._ensure_config_exists()
+        self._load_servers()
+    
+    def _ensure_config_exists(self):
+        """Ensure config directory and files exist"""
+        os.makedirs(self.db_path, exist_ok=True)
+        
+        imap_path = os.path.join(self.db_path, "imap_servers.txt")
+        if not os.path.exists(imap_path):
+            with open(imap_path, 'w', encoding='utf-8') as f:
+                f.write("# IMAP Server Mappings - Auto-updated with working servers\n")
+                f.write("# Format: domain=server (e.g., gmail.com=imap.gmail.com)\n")
+        
+        pop_path = os.path.join(self.db_path, "pop_servers.txt")
+        if not os.path.exists(pop_path):
+            with open(pop_path, 'w', encoding='utf-8') as f:
+                f.write("# POP3 Server Mappings - Auto-updated with working servers\n")
+                f.write("# Format: domain=server (e.g., gmail.com=pop.gmail.com)\n")
+    
+    def _load_servers(self):
+        """Load server configurations from text files"""
+        # Load IMAP servers
+        imap_path = os.path.join(self.db_path, "imap_servers.txt")
+        if os.path.exists(imap_path):
+            with open(imap_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if '=' in line:
+                            parts = line.split('=', 1)
+                            if len(parts) == 2:
+                                domain = parts[0].strip().lower()
+                                server = parts[1].strip()
+                                self.imap_servers[domain] = server
+        
+        # Load POP3 servers
+        pop_path = os.path.join(self.db_path, "pop_servers.txt")
+        if os.path.exists(pop_path):
+            with open(pop_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if '=' in line:
+                            parts = line.split('=', 1)
+                            if len(parts) == 2:
+                                domain = parts[0].strip().lower()
+                                server = parts[1].strip()
+                                self.pop_servers[domain] = server
+    
+    def _save_server(self, domain: str, server: str, protocol: str):
+        """Save working server to config file (auto-cleaning)
+        
+        Args:
+            domain: Email domain
+            server: Server hostname
+            protocol: 'imap' or 'pop3'
+        """
+        filename = "imap_servers.txt" if protocol == "imap" else "pop_servers.txt"
+        filepath = os.path.join(self.db_path, filename)
+        
+        # Update in-memory cache
+        if protocol == "imap":
+            self.imap_servers[domain] = server
+        else:
+            self.pop_servers[domain] = server
+        
+        # Read existing entries
+        entries = {}
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if '=' in line:
+                            parts = line.split('=', 1)
+                            if len(parts) == 2:
+                                d = parts[0].strip().lower()
+                                s = parts[1].strip()
+                                entries[d] = s
+        
+        # Update or add new entry
+        entries[domain] = server
+        
+        # Write back to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            if protocol == "imap":
+                f.write("# IMAP Server Mappings - Auto-updated with working servers\n")
+                f.write("# Format: domain=server (e.g., gmail.com=imap.gmail.com)\n")
+            else:
+                f.write("# POP3 Server Mappings - Auto-updated with working servers\n")
+                f.write("# Format: domain=server (e.g., gmail.com=pop.gmail.com)\n")
+            
+            for d, s in sorted(entries.items()):
+                f.write(f"{d}={s}\n")
+    
+    def _try_imap_connection(self, server: str, port: int, email_addr: str, password: str, timeout: int, use_ssl: bool) -> Tuple[bool, Optional[object], str]:
+        """Try IMAP connection
+        
+        Returns:
+            (success, connection_object, error_type) where error_type is 'AUTH' or 'CONN'
+        """
+        try:
+            if use_ssl:
+                conn = imaplib.IMAP4_SSL(server, port, timeout=timeout)
+            else:
+                conn = imaplib.IMAP4(server, port, timeout=timeout)
+                try:
+                    conn.starttls()
+                except (imaplib.IMAP4.error, ssl.SSLError):
+                    pass  # StartTLS optional for port 143
+            
+            try:
+                conn.login(email_addr, password)
+                return True, conn, None
+            except imaplib.IMAP4.error as e:
+                # Authentication failed
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+                return False, None, 'AUTH'
+        except (socket.timeout, socket.error, OSError, ssl.SSLError) as e:
+            # Connection failed
+            return False, None, 'CONN'
+        except Exception as e:
+            return False, None, 'CONN'
+    
+    def _try_pop_connection(self, server: str, port: int, email_addr: str, password: str, timeout: int, use_ssl: bool) -> Tuple[bool, Optional[object], str]:
+        """Try POP3 connection
+        
+        Returns:
+            (success, connection_object, error_type) where error_type is 'AUTH' or 'CONN'
+        """
+        try:
+            if use_ssl:
+                conn = poplib.POP3_SSL(server, port, timeout=timeout)
+            else:
+                conn = poplib.POP3(server, port, timeout=timeout)
+                try:
+                    conn.stls()
+                except (poplib.error_proto, ssl.SSLError):
+                    pass  # STLS optional for port 110
+            
+            try:
+                conn.user(email_addr)
+                conn.pass_(password)
+                return True, conn, None
+            except poplib.error_proto as e:
+                # Authentication failed
+                try:
+                    conn.quit()
+                except Exception:
+                    pass
+                return False, None, 'AUTH'
+        except (socket.timeout, socket.error, OSError, ssl.SSLError) as e:
+            # Connection failed
+            return False, None, 'CONN'
+        except Exception as e:
+            return False, None, 'CONN'
+    
+    def _guess_servers(self, domain: str) -> List[Tuple[str, str]]:
+        """Guess common server names for domain
+        
+        Returns:
+            List of (protocol, server) tuples
+        """
+        servers = []
+        
+        # Common IMAP patterns
+        servers.append(('imap', f'imap.{domain}'))
+        servers.append(('imap', f'mail.{domain}'))
+        
+        # Common POP3 patterns
+        servers.append(('pop3', f'pop.{domain}'))
+        servers.append(('pop3', f'pop3.{domain}'))
+        servers.append(('pop3', f'mail.{domain}'))
+        
+        return servers
+    
+    def connect(self, email_addr: str, password: str) -> Tuple[str, Dict]:
+        """Connect to mail server using aggressive hybrid approach
+        
+        Args:
+            email_addr: Email address
+            password: Password
+            
+        Returns:
+            (result_code, details) where:
+                result_code: 'SUCCESS', 'AUTH_FAILED', or 'CONN_ERROR'
+                details: Dict with connection info (protocol, server, port, connection)
+        """
+        domain = email_addr.split('@')[-1].lower()
+        
+        # Track if we got any auth failures
+        auth_failed = False
+        
+        # PHASE 1: IMAP
+        # Try known IMAP server first
+        imap_servers_to_try = []
+        if domain in self.imap_servers:
+            imap_servers_to_try.append(self.imap_servers[domain])
+        
+        # Add guessed servers
+        for proto, server in self._guess_servers(domain):
+            if proto == 'imap' and server not in imap_servers_to_try:
+                imap_servers_to_try.append(server)
+        
+        for server in imap_servers_to_try:
+            # Port 993 (SSL) - 6s timeout
+            success, conn, error_type = self._try_imap_connection(
+                server, 993, email_addr, password, 6, True
+            )
+            if success:
+                self._save_server(domain, server, 'imap')
+                return 'SUCCESS', {
+                    'protocol': 'imap',
+                    'server': server,
+                    'port': 993,
+                    'connection': conn,
+                    'ssl': True
+                }
+            if error_type == 'AUTH':
+                auth_failed = True
+            
+            # Port 143 (StartTLS) - 12s timeout
+            success, conn, error_type = self._try_imap_connection(
+                server, 143, email_addr, password, 12, False
+            )
+            if success:
+                self._save_server(domain, server, 'imap')
+                return 'SUCCESS', {
+                    'protocol': 'imap',
+                    'server': server,
+                    'port': 143,
+                    'connection': conn,
+                    'ssl': False
+                }
+            if error_type == 'AUTH':
+                auth_failed = True
+        
+        # Safety delay before trying POP3
+        if auth_failed or len(imap_servers_to_try) > 0:
+            time.sleep(self.PROTOCOL_SWITCH_DELAY)
+        
+        # PHASE 2: POP3 (Fallback)
+        pop_servers_to_try = []
+        if domain in self.pop_servers:
+            pop_servers_to_try.append(self.pop_servers[domain])
+        
+        # Add guessed servers
+        for proto, server in self._guess_servers(domain):
+            if proto == 'pop3' and server not in pop_servers_to_try:
+                pop_servers_to_try.append(server)
+        
+        for server in pop_servers_to_try:
+            # Port 995 (SSL) - 4s timeout
+            success, conn, error_type = self._try_pop_connection(
+                server, 995, email_addr, password, 4, True
+            )
+            if success:
+                self._save_server(domain, server, 'pop3')
+                return 'SUCCESS', {
+                    'protocol': 'pop3',
+                    'server': server,
+                    'port': 995,
+                    'connection': conn,
+                    'ssl': True
+                }
+            if error_type == 'AUTH':
+                auth_failed = True
+            
+            # Port 110 (StartTLS) - 8s timeout
+            success, conn, error_type = self._try_pop_connection(
+                server, 110, email_addr, password, 8, False
+            )
+            if success:
+                self._save_server(domain, server, 'pop3')
+                return 'SUCCESS', {
+                    'protocol': 'pop3',
+                    'server': server,
+                    'port': 110,
+                    'connection': conn,
+                    'ssl': False
+                }
+            if error_type == 'AUTH':
+                auth_failed = True
+        
+        # Return final verdict
+        if auth_failed:
+            return 'AUTH_FAILED', {}
+        else:
+            return 'CONN_ERROR', {}
 
 
 class MailViewerBackend:
@@ -878,23 +1190,54 @@ class MailViewerGUI:
         threading.Thread(target=self._login_thread, args=(email_address, password), daemon=True).start()
     
     def _login_thread(self, email_address, password):
-        success, message = self.backend.connect(email_address, password)
-        self.root.after(0, self._login_callback, success, message, email_address, password)
+        """Background thread for login using SmartLoginHandler"""
+        handler = SmartLoginHandler(db_path="./email_config")
+        result_code, details = handler.connect(email_address, password)
+        self.root.after(0, self._login_callback, result_code, details, email_address, password)
     
-    def _login_callback(self, success, message, email_address, password):
+    def _login_callback(self, result_code, details, email_address, password):
+        """Callback after login attempt"""
         self.progress.stop()
         self.progress.pack_forget()
         self.login_button.config(state=tk.NORMAL)
         self.credentials_entry.config(state=tk.NORMAL)
         self.loading = False
         
-        if success:
+        if result_code == "SUCCESS":
+            # Extract connection details
+            protocol = details['protocol']
+            server = details['server']
+            port = details['port']
+            connection = details['connection']
+            
+            # Set up backend with the working connection
+            self.backend.protocol = protocol
+            self.backend.connection = connection
+            self.backend.email_address = email_address
+            self.backend.password = password
+            self.backend.host = server
+            self.backend.port = port
+            
             self.status_label.config(text="Connected successfully", fg='#4caf50')
             self.stored_credentials = f"{email_address}:{password}"
             self.root.after(500, self.show_mail_frame)
-        else:
+            
+        elif result_code == "AUTH_FAILED":
+            self.status_label.config(text="Authentication failed", fg='#ff5252')
+            messagebox.showerror(
+                "Invalid Password",
+                "Authentication failed. Your credentials were rejected by all mail servers.\n\n"
+                "Both IMAP and POP3 protocols were tried with a safety delay between attempts.\n\n"
+                "Please verify your email and password are correct."
+            )
+            
+        elif result_code == "CONN_ERROR":
             self.status_label.config(text="Connection failed", fg='#ff5252')
-            messagebox.showerror("Connection Error", message)
+            messagebox.showerror(
+                "Connection Failed",
+                "Server not responding. Could not connect to any mail servers.\n\n"
+                "Please check your internet connection and try again."
+            )
     
     def show_mail_frame(self):
         """Show mail interface"""
