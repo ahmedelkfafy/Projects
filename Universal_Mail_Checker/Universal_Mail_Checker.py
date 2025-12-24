@@ -8,6 +8,7 @@ import threading
 import time
 import re
 import email
+import urllib.request
 from email.header import decode_header
 from queue import Queue
 from datetime import datetime, timedelta
@@ -39,6 +40,10 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QTextCursor
 logging.basicConfig(level=logging.WARNING,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.FileHandler("universal_mail_checker_debug.log", mode='w', encoding='utf-8')])
+
+# Default settings constants
+DEFAULT_KEYWORDS = "password\ninvoice\nverification"
+DEFAULT_SENDERS = "epicgames.com\nmicrosoft.com"
 
 
 def decode_mime_header(header):
@@ -197,11 +202,11 @@ class MailCheckerWorker(QObject):
         
         # Intelligence Search settings
         self.intelligence_search = settings.get('intelligence_search_enabled', False)
-        self.intelligence_keywords = settings.get('intelligence_keywords', '').split('\n')
-        self.intelligence_senders = settings.get('intelligence_senders', '').split('\n')
+        self.intelligence_keywords = [k.strip() for k in settings.get('intelligence_keywords', '').split('\n') if k.strip()]
+        self.intelligence_senders = [s.strip() for s in settings.get('intelligence_senders', '').split('\n') if s.strip()]
         self.search_in_subject = settings.get('search_in_subject', True)
         self.search_in_body = settings.get('search_in_body', True)
-        self.intelligence_mailboxes = settings.get('intelligence_mailboxes', 'INBOX').split(',')
+        self.intelligence_mailboxes = [m.strip() for m in settings.get('intelligence_mailboxes', 'INBOX').split(',') if m.strip()]
         self.fetch_count = settings.get('intelligence_emails_to_fetch', 5)
 
         # Auto-reload proxies
@@ -525,7 +530,6 @@ class MailCheckerWorker(QObject):
     def save_intelligence_result(self, match_detail, combo, message_count):
         """Save intelligence result to file"""
         try:
-            import re
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', match_detail)
             output_file = os.path.join(
                 self.settings['intelligence_results_folder'],
@@ -548,8 +552,6 @@ class MailCheckerWorker(QObject):
             return []
         
         try:
-            import urllib.request
-            
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -585,8 +587,8 @@ class MailCheckerWorker(QObject):
                 new_proxies = self.load_proxies_from_url()
                 
                 if new_proxies:
-                    self.proxies.extend(new_proxies)
-                    self.proxies = [p for p in self.proxies if p not in self.blocked_proxies]
+                    # Use set operations to avoid duplicates and filter blocked proxies
+                    self.proxies = list(set(self.proxies + new_proxies) - self.blocked_proxies)
                     self.blocked_proxies.clear()
                     
                     self.signals.log.emit(
@@ -1171,8 +1173,8 @@ class SettingsDialog(QDialog):
         self.intelligence_search_checkbox.setChecked(is_intel_enabled)
         self.search_options_group.setEnabled(is_intel_enabled)
         
-        self.keywords_edit.setText(s.value("intelligence_keywords", "password\ninvoice\nverification"))
-        self.senders_edit.setText(s.value("intelligence_senders", "epicgames.com\nmicrosoft.com"))
+        self.keywords_edit.setText(s.value("intelligence_keywords", DEFAULT_KEYWORDS))
+        self.senders_edit.setText(s.value("intelligence_senders", DEFAULT_SENDERS))
         self.search_in_subject_cb.setChecked(s.value("search_in_subject", True, type=bool))
         self.search_in_body_cb.setChecked(s.value("search_in_body", True, type=bool))
         self.mailboxes_edit.setText(s.value("intelligence_mailboxes", "INBOX,Spam"))
