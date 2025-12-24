@@ -587,36 +587,75 @@ class MailViewerBackend:
         
         return ['INBOX']
     
+    def _search_cached_emails(self, search_term: str, search_field: str = 'ALL', progress_callback=None) -> List[Dict]:
+        """Search in cached emails (POP3 fallback)"""
+        results = []
+        search_lower = search_term.lower()
+        total = len(self._cached_emails)
+        
+        for idx, email_data in enumerate(self._cached_emails):
+            try:
+                matched = False
+                
+                if search_field == 'Subject':
+                    if search_lower in email_data.get('subject', '').lower():
+                        matched = True
+                elif search_field == 'From' or search_field == 'Sender':
+                    if search_lower in email_data.get('from', '').lower():
+                        matched = True
+                elif search_field == 'Body':
+                    if search_lower in email_data.get('body', '').lower():
+                        matched = True
+                else:  # ALL fields
+                    if (search_lower in email_data.get('subject', '').lower() or 
+                        search_lower in email_data.get('from', '').lower() or 
+                        search_lower in email_data.get('body', '').lower()):
+                        matched = True
+                
+                if matched:
+                    results.append(email_data)
+                
+                if progress_callback and idx % 10 == 0:
+                    progress_callback(idx + 1, total)
+            except:
+                continue
+        
+        if progress_callback:
+            progress_callback(total, total)
+        
+        return results[:100]  # Max 100 results
+    
     def search_emails(self, search_term: str, search_field: str = 'ALL', folder: str = None, progress_callback=None) -> List[Dict]:
-        """Search emails"""
+        """Search emails - IMAP (server) or POP3 (local cache)"""
         if folder:
             self.current_folder = folder
             
         try:
-            if self.protocol != 'imap':
-                return []
-            
-            status, response = self.connection.select(self.current_folder, readonly=True)
-            if status != 'OK':
-                return []
-            
-            if search_field == 'Subject':
-                criteria = f'(SUBJECT "{search_term}")'
-            elif search_field == 'From' or search_field == 'Sender':
-                criteria = f'(FROM "{search_term}")'
-            elif search_field == 'Body':
-                criteria = f'(BODY "{search_term}")'
+            if self.protocol == 'imap':
+                # Existing IMAP server-side search code
+                status, response = self.connection.select(self.current_folder, readonly=True)
+                if status != 'OK':
+                    return []
+                
+                if search_field == 'Subject':
+                    criteria = f'(SUBJECT "{search_term}")'
+                elif search_field == 'From' or search_field == 'Sender':
+                    criteria = f'(FROM "{search_term}")'
+                elif search_field == 'Body':
+                    criteria = f'(BODY "{search_term}")'
+                else:
+                    criteria = f'(OR (OR SUBJECT "{search_term}" FROM "{search_term}") BODY "{search_term}")'
+                
+                status, messages = self.connection.search(None, criteria)
+                
+                if status != 'OK':
+                    return []
+                
+                email_ids = messages[0].split()[-100:]
+                return self._batch_fetch_emails(email_ids, progress_callback)
             else:
-                criteria = f'(OR (OR SUBJECT "{search_term}" FROM "{search_term}") BODY "{search_term}")'
-            
-            status, messages = self.connection.search(None, criteria)
-            
-            if status != 'OK':
-                return []
-            
-            email_ids = messages[0].split()[-100:]
-            return self._batch_fetch_emails(email_ids, progress_callback)
-            
+                # NEW: Local cache search for POP3
+                return self._search_cached_emails(search_term, search_field, progress_callback)
         except:
             return []
     
@@ -702,6 +741,15 @@ class MailViewerBackend:
             
             emails = self._batch_fetch_emails(selected_ids, progress_callback)
             
+            # Add to cache and keep only last 50 emails
+            for email_data in emails:
+                if email_data not in self._cached_emails:
+                    self._cached_emails.append(email_data)
+            
+            # Keep only last 50 emails
+            if len(self._cached_emails) > 50:
+                self._cached_emails = self._cached_emails[-50:]
+            
             return emails, total
         except:
             return [], 0
@@ -725,12 +773,21 @@ class MailViewerBackend:
                     response, lines, octets = self.connection.retr(i)
                     msg_content = b'\r\n'.join(lines)
                     msg = email.message_from_bytes(msg_content)
-                    emails.append(self._parse_email(msg, str(i)))
+                    parsed = self._parse_email(msg, str(i))
+                    emails.append(parsed)
+                    
+                    # Add to cache
+                    if parsed not in self._cached_emails:
+                        self._cached_emails.append(parsed)
                     
                     if progress_callback:
                         progress_callback(len(emails), total)
                 except:
                     continue
+            
+            # After loop, keep only last 50 emails
+            if len(self._cached_emails) > 50:
+                self._cached_emails = self._cached_emails[-50:]
             
             return emails[::-1], num_messages
         except:
@@ -994,6 +1051,20 @@ class MailViewerBackend:
             return True
         except:
             return False
+    
+    def check_for_new_emails(self, last_count: int) -> int:
+        """Check if there are new emails since last fetch"""
+        try:
+            if self.protocol == 'imap':
+                status, messages = self.connection.search(None, 'ALL')
+                if status == 'OK':
+                    current_count = len(messages[0].split())
+                    return current_count - last_count
+            else:  # POP3
+                current_count = len(self.connection.list()[1])
+                return current_count - last_count
+        except:
+            return 0
     
     def delete_email(self, email_id: str) -> bool:
         """Delete email"""
@@ -1560,9 +1631,28 @@ class MailViewerGUI:
             self.refresh_inbox()
             return
         
+        # Add informative message for POP3 users
+        if hasattr(self.backend, 'protocol') and self.backend.protocol == 'pop3':
+            cached_count = len(self.backend._cached_emails)
+            result = messagebox.askokcancel(
+                "POP3 Local Search",
+                f"POP3 doesn't support server search.\n\n"
+                f"Will search in {cached_count} cached emails only.\n\n"
+                f"Tip: Use IMAP for full server search.\n\n"
+                f"Continue?"
+            )
+            if not result:
+                return
+        
         self.loading = True
         self.is_searching = True
-        self.status_text.config(text="Searching...")
+        
+        # Update status text to show "Searching X cached emails..." for POP3
+        if hasattr(self.backend, 'protocol') and self.backend.protocol == 'pop3':
+            cached_count = len(self.backend._cached_emails)
+            self.status_text.config(text=f"Searching {cached_count} cached emails...")
+        else:
+            self.status_text.config(text="Searching...")
         
         threading.Thread(target=self._search_thread, args=(term,), daemon=True).start()
     
@@ -1600,7 +1690,13 @@ class MailViewerGUI:
         
         self.hide_progress()
         self.is_searching = False
-        self.status_text.config(text=f"Found {len(self.current_emails)} results")
+        
+        # Show appropriate status message
+        if hasattr(self.backend, 'protocol') and self.backend.protocol == 'pop3':
+            self.status_text.config(text=f"Found {len(self.current_emails)} results in cached emails")
+        else:
+            self.status_text.config(text=f"Found {len(self.current_emails)} results")
+        
         self.loading = False
     
     def clear_search(self):
