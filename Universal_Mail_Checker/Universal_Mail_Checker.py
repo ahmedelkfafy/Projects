@@ -724,6 +724,68 @@ class MailCheckerWorker(QObject):
         
         return False, None, error
 
+    def try_imap_login_keep_connection_multi_port(self, email_addr, password, server):
+        """Try IMAP login on multiple ports and KEEP connection open for intelligence search"""
+        if not self.is_running:
+            return False, None, 'stopped'
+        
+        timeout = self.settings['timeout']
+        
+        # Try port 993 (SSL) first
+        success, imap_conn, error = self.try_imap_login_keep_connection(email_addr, password, server, 993, timeout)
+        if success:
+            return True, imap_conn, None
+        
+        if error == 'invalid':
+            return False, None, 'invalid'
+        
+        if error == 'stopped':
+            return False, None, 'stopped'
+        
+        # Try port 143 (non-SSL) as fallback
+        try:
+            imap_conn = imaplib.IMAP4(host=server, port=143)
+            imap_conn.sock.settimeout(timeout)
+            
+            if not self.is_running:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'stopped'
+            
+            typ, data = imap_conn.login(email_addr, password)
+            
+            if typ == 'OK':
+                return True, imap_conn, None
+            else:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+                return False, None, 'invalid'
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'invalid'
+        except (socket.timeout, TimeoutError):
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, 'timeout'
+        except Exception as e:
+            if imap_conn:
+                try:
+                    imap_conn.logout()
+                except:
+                    pass
+            return False, None, str(e)[:30]
+
     def _build_nested_or_query(self, criteria):
         """Build nested OR query for IMAP search - OPTIMIZED"""
         if not criteria:
@@ -1078,10 +1140,9 @@ class MailCheckerWorker(QObject):
                 success, capture, error = self.try_imap_multi_port(email_addr, password, imap_server)
                 
                 if success:
-                    # Open connection for intelligence search
-                    timeout = self.settings['timeout']
-                    success_intel, imap_conn, _ = self.try_imap_login_keep_connection(
-                        email_addr, password, imap_server, 993, timeout
+                    # Open connection for intelligence search (try multi-port)
+                    success_intel, imap_conn, _ = self.try_imap_login_keep_connection_multi_port(
+                        email_addr, password, imap_server
                     )
                     
                     if success_intel:
