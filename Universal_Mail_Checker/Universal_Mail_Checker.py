@@ -743,6 +743,7 @@ class MailCheckerWorker(QObject):
             return False, None, 'stopped'
         
         # Try port 143 (non-SSL) as fallback
+        imap_conn = None
         try:
             imap_conn = imaplib.IMAP4(host=server, port=143)
             imap_conn.sock.settimeout(timeout)
