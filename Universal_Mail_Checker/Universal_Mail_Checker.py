@@ -467,7 +467,7 @@ class MailCheckerWorker(QObject):
         
         # ✅ CRITICAL FIX: Create immutable combo snapshot immediately
         # This protects against parameter changes during async execution
-        COMBO_SNAPSHOT = f"{email_addr}:{password}"
+        combo_snapshot = f"{email_addr}:{password}"
         
         try:
             keywords = [k.strip() for k in self.intelligence_keywords if k.strip()]
@@ -507,8 +507,8 @@ class MailCheckerWorker(QObject):
                         if typ == 'OK' and data[0]:
                             message_count = len(data[0].split())
                             if message_count > 0:
-                                # ✅ USE COMBO_SNAPSHOT (immutable, thread-safe)
-                                self.save_intelligence_result(keyword, COMBO_SNAPSHOT, message_count)
+                                # ✅ USE combo_snapshot (immutable, thread-safe)
+                                self.save_intelligence_result(keyword, combo_snapshot, message_count)
                                 with self.stats_lock:
                                     self.stats['intelligence_hits'] += 1
                     
@@ -522,8 +522,8 @@ class MailCheckerWorker(QObject):
                         if typ == 'OK' and data[0]:
                             message_count = len(data[0].split())
                             if message_count > 0:
-                                # ✅ USE COMBO_SNAPSHOT (immutable, thread-safe)
-                                self.save_intelligence_result(sender, COMBO_SNAPSHOT, message_count)
+                                # ✅ USE combo_snapshot (immutable, thread-safe)
+                                self.save_intelligence_result(sender, combo_snapshot, message_count)
                                 with self.stats_lock:
                                     self.stats['intelligence_hits'] += 1
                     
