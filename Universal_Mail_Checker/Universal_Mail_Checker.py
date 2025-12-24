@@ -54,6 +54,31 @@ DEFAULT_SENDERS = "epicgames.com\nmicrosoft.com"
 MIN_PROXIES_THRESHOLD = 10  # Minimum active proxies before auto-reload
 
 
+def create_default_blacklist():
+    if not os.path.exists('blacklist.txt'):
+        with open('blacklist.txt', 'w', encoding='utf-8') as f:
+            f.write("# Add domains to blacklist (one per line)\n")
+            f.write("# Example:\n")
+            f.write("# example.com\n")
+            f.write("# spam-domain.com\n")
+        logging.info("Default 'blacklist.txt' created.")
+
+def load_blacklist_from_file(file_path):
+    blacklist = set()
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    domain = line.strip().lower()
+                    if domain and not domain.startswith('#'):
+                        blacklist.add(domain)
+            logging.info(f"Loaded {len(blacklist)} domains from blacklist")
+            return blacklist
+        except Exception as e:
+            logging.error(f"Failed to load blacklist from {file_path}: {e}")
+    return blacklist
+
+
 def decode_mime_header(header):
     """Decode MIME encoded email headers"""
     if header is None:
@@ -171,6 +196,7 @@ class WorkerSignals(QObject):
     add_invalid = pyqtSignal(str, str)
     add_error = pyqtSignal(str, str)
     add_intelligence_hit = pyqtSignal(str, str, str, str, list)  # email, match_type, match_detail, mailbox, details_list
+    blacklisted = pyqtSignal(int)
 
 
 class MailCheckerWorker(QObject):
@@ -179,7 +205,7 @@ class MailCheckerWorker(QObject):
         self.settings = settings
         self.is_running = True
         self.is_paused = False
-        self.stats = {'hits': 0, 'invalids': 0, 'errors': 0, 'checked': 0, 'intelligence_hits': 0}
+        self.stats = {'hits': 0, 'invalids': 0, 'errors': 0, 'checked': 0, 'intelligence_hits': 0, 'blacklisted': 0}
         
         self.session_folder = self.create_session_folder()
         
@@ -193,6 +219,7 @@ class MailCheckerWorker(QObject):
         
         self.combo_file_path = None
         self.proxies = []
+        self.blacklist = set()
         
         self.signals = WorkerSignals()
         self.server_manager = ServerManager()
@@ -292,6 +319,13 @@ class MailCheckerWorker(QObject):
 
     def toggle_pause(self):
         self.is_paused = not self.is_paused
+
+    def is_blacklisted(self, email):
+        try:
+            domain = email.split('@')[1].lower()
+            return domain in self.blacklist
+        except:
+            return False
 
     def try_pop3_login(self, email_addr, password, server, port, timeout=5):
         """Try POP3 login"""
@@ -1121,6 +1155,10 @@ class MailCheckerWorker(QObject):
             domain = email_addr.split('@')[1]
             combo_str = f"{email_addr}:{password}"
             
+            # Check blacklist BEFORE any server connection
+            if self.is_blacklisted(email_addr):
+                return {'status': 'blacklisted', 'combo': combo_str, 'domain': domain}
+            
             # Setup proxy if enabled
             if self.use_proxies and self.proxies:
                 import random
@@ -1219,14 +1257,20 @@ class MailCheckerWorker(QObject):
         with self.stats_lock:
             self.stats['checked'] += 1
             
-            if result['status'] == 'hit':
+            if result['status'] == 'blacklisted':
+                self.stats['blacklisted'] += 1
+            elif result['status'] == 'hit':
                 self.stats['hits'] += 1
             elif result['status'] == 'invalid':
                 self.stats['invalids'] += 1
             elif result['status'] == 'error':
                 self.stats['errors'] += 1
         
-        if result['status'] == 'hit':
+        if result['status'] == 'blacklisted':
+            self.signals.blacklisted.emit(self.stats['blacklisted'])
+            self.signals.log.emit(f"BLACKLISTED -> {result['combo']} [{result['domain']}]", QColor("#ff6b6b"))
+            
+        elif result['status'] == 'hit':
             protocol = result.get('protocol', 'Unknown')
             capture = result.get('capture', 'Valid')
             # CRITICAL: Live.txt format is "email:pass" ONLY - NO protocol, NO capture info
@@ -1734,12 +1778,21 @@ class MainWindow(QMainWindow):
         self.combos_file_path = None
         self.proxies_loaded = 0
         
+        self.blacklist = set()
+        self.blacklist_loaded = 0
+        
         self.current_session_folder = None
 
+        # Initialize blacklist
+        create_default_blacklist()
+        
         self.init_ui()
         self.create_menu_bar()
         self.init_actions()
         self.apply_theme()
+
+        # Auto-load blacklist after UI is initialized
+        self._auto_load_blacklist()
 
         self.progress_timer = QTimer()
         self.progress_timer.timeout.connect(self.timer_update_progress)
@@ -1771,8 +1824,17 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
+        reload_blacklist_action = file_menu.addAction("Reload Blacklist")
+        reload_blacklist_action.triggered.connect(self.reload_blacklist)
+        
+        file_menu.addSeparator()
+        
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
+        
+        domain_menu = menubar.addMenu("&Domains")
+        domain_menu.addAction("View Blacklist...", self.view_blacklist)
+        domain_menu.addAction("Edit Blacklist...", self.edit_blacklist)
         
         tools_menu = menubar.addMenu("&Tools")
         
@@ -1880,6 +1942,7 @@ class MainWindow(QMainWindow):
             ("INVALIDS", "0", "#a3a3a3"),
             ("ERRORS", "0", "#d4d4d4"),
             ("CPM", "0", "#e5e5e5"),
+            ("BLACKLISTED", "0", "#ff6b6b"),
         ]
         
         for label_text, value, color in stats_data:
@@ -1900,8 +1963,13 @@ class MainWindow(QMainWindow):
         self.proxies_info.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.proxies_info.setStyleSheet("color: #a3a3a3; padding: 8px;")
         
+        self.blacklist_info = QLabel(f"Blacklist: {self.blacklist_loaded}")
+        self.blacklist_info.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.blacklist_info.setStyleSheet("color: #ff6b6b; padding: 8px;")
+        
         file_controls.addWidget(self.combos_info)
         file_controls.addWidget(self.proxies_info)
+        file_controls.addWidget(self.blacklist_info)
         file_controls.addStretch()
         
         btn_load_combos = self.create_small_button("Load Combos")
@@ -2278,6 +2346,8 @@ class MainWindow(QMainWindow):
         
         self.worker.combo_file_path = self.combos_file_path
         
+        self.worker.blacklist = self.blacklist.copy()
+        
         if hasattr(self, 'proxies'):
             self.worker.proxies = self.proxies
 
@@ -2291,6 +2361,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.add_hit.connect(self.add_hit_to_table)
         self.worker.signals.add_invalid.connect(self.add_invalid_to_table)
         self.worker.signals.add_error.connect(self.add_error_to_table)
+        self.worker.signals.blacklisted.connect(self.update_blacklisted_count)
 
         self.worker_thread.started.connect(self.worker.run)
         self.worker_thread.start()
@@ -2486,6 +2557,125 @@ Results saved to:
         self.cpm = cpm_val
         self.stat_widgets['cpm'].value_label.setText(f"{cpm_val:,}")
 
+    def update_blacklisted_count(self, count):
+        self.stat_widgets['blacklisted'].value_label.setText(f"{count:,}")
+
+    def _auto_load_blacklist(self):
+        blacklist_file = 'blacklist.txt'
+        self.blacklist = load_blacklist_from_file(blacklist_file)
+        self.blacklist_loaded = len(self.blacklist)
+        if self.blacklist_loaded > 0:
+            logging.info(f"Auto-loaded {self.blacklist_loaded} blacklisted domains")
+            self.blacklist_info.setText(f"Blacklist: {self.blacklist_loaded:,}")
+
+    def reload_blacklist(self):
+        try:
+            blacklist_file = 'blacklist.txt'
+            self.blacklist = load_blacklist_from_file(blacklist_file)
+            self.blacklist_loaded = len(self.blacklist)
+            self.blacklist_info.setText(f"Blacklist: {self.blacklist_loaded:,}")
+            self.update_status(f"Reloaded {self.blacklist_loaded:,} blacklisted domains", "#ff6b6b")
+            QMessageBox.information(self, "Blacklist Reloaded", 
+                                  f"Successfully reloaded {self.blacklist_loaded:,} blacklisted domains from blacklist.txt")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to reload blacklist: {e}")
+
+    def view_blacklist(self):
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Blacklist")
+        dialog.setMinimumSize(700, 550)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f0f0f, stop:1 #1a1a1a);
+            }
+            QLabel {
+                color: #d4d4d4;
+                font-size: 11pt;
+            }
+            QListWidget {
+                background: rgba(26, 26, 26, 0.3);
+                color: #ff6b6b;
+                border: 2px solid rgba(115, 115, 115, 0.3);
+                border-radius: 8px;
+                font-size: 10pt;
+                font-family: 'Courier New';
+            }
+            QListWidget::item {
+                padding: 8px;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #525252, stop:1 #737373);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 25px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #737373, stop:1 #a3a3a3);
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        title = QLabel("Blacklisted Domains")
+        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title.setStyleSheet("color: #d4d4d4;")
+        layout.addWidget(title)
+        
+        info_label = QLabel(f"Total Blacklisted Domains: {len(self.blacklist)}")
+        info_label.setFont(QFont("Segoe UI", 11))
+        info_label.setStyleSheet("color: #ff6b6b; padding: 5px;")
+        layout.addWidget(info_label)
+        
+        list_widget = QListWidget()
+        
+        if self.blacklist:
+            for domain in sorted(self.blacklist):
+                list_widget.addItem(domain)
+        else:
+            empty_item = QListWidgetItem("No blacklisted domains")
+            empty_item.setForeground(QColor("#888"))
+            list_widget.addItem(empty_item)
+        
+        layout.addWidget(list_widget)
+        
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(120)
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        dialog.exec()
+
+    def edit_blacklist(self):
+        blacklist_file = 'blacklist.txt'
+        
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(blacklist_file)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', blacklist_file])
+            else:
+                subprocess.call(['xdg-open', blacklist_file])
+                
+            QMessageBox.information(self, "Blacklist", 
+                                  "The blacklist file has been opened for editing.\nRemember to reload the blacklist after making changes.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open blacklist file: {e}")
+
     def toggle_controls(self, running):
         self.btn_start.setEnabled(not running)
         self.btn_pause.setEnabled(running)
@@ -2504,6 +2694,7 @@ Results saved to:
         self.stat_widgets['invalids'].value_label.setText("0")
         self.stat_widgets['errors'].value_label.setText("0")
         self.stat_widgets['cpm'].value_label.setText("0")
+        self.stat_widgets['blacklisted'].value_label.setText("0")
         
         self.tabs.setTabText(0, "HITS (0)")
         self.tabs.setTabText(1, "INVALIDS (0)")
